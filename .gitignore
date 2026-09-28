@@ -1,0 +1,22 @@
+node_modules
+
+# macOS
+.DS_Store
+
+/.cache
+/build
+/app/build
+/public/build/
+/public/_dev
+/app/public/build
+/prisma/dev.sqlite
+/prisma/dev.sqlite-journal
+database.sqlite
+
+.env
+.env.*
+
+# Shopify CLI / build ka apne aap bana data
+.shopify
+extensions/*/dist
+.react-router

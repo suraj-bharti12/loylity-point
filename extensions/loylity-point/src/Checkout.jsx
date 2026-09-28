@@ -1,0 +1,624 @@
+import "@shopify/ui-extensions/preact";
+import { render } from "preact";
+import { useState, useEffect, useRef } from "preact/hooks";
+
+// ================== Server kahan hai ==================
+// Local test (shopify app dev) mein ye box trycloudflare tunnel se load hota hai,
+// to apne aap wahi server use hoga. Kuch set karne ki zarurat nahi.
+// Agar box mein "Server URL is not set" aaye, to terminal wala trycloudflare URL
+// MANUAL_API_BASE mein daal do (end mein / nahi).
+const MANUAL_API_BASE = "https://supposed-consultants-reasoning-adjustable.trycloudflare.com"; // <-- YAHAN apna abhi wala trycloudflare URL daalo
+// Live ke liye (baad mein): naye app ke asli server ka URL
+const PROD_API_BASE = "";
+
+// Testing ke time error mein server URL dikhao (live se pehle false kar dena)
+const SHOW_DEBUG = true;
+
+const PING_EVERY_MS = 20 * 1000;
+const REQUEST_TIMEOUT_MS = 30 * 1000;
+const STORAGE_KEY = "loyalty_points_redemption_v1";
+const GIFT_CARD_PRODUCT_TYPE = "gift cards";
+
+// Order "Additional details" keys (wallet wali keys se alag)
+const ATTR_KEYS = {
+  points: "PointsRedeemed",
+  amount: "PointsAmountRedeemed",
+  invoice: "PointsInvoiceNumber",
+  approval: "PointsApprovalCode",
+  batch: "PointsBatchNumber",
+  date: "PointsTransactionDate",
+  bill: "PointsBillAmount",
+  toPay: "PointsAmountToPay",
+};
+
+export default async () => {
+  render(<Extension />, document.body);
+};
+
+// ================== Helpers ==================
+
+function getApiUrl() {
+  if (MANUAL_API_BASE) return `${MANUAL_API_BASE}/api/points`;
+  try {
+    const origin = new URL(shopify.extension.scriptUrl).origin;
+    if (origin.includes("trycloudflare.com")) return `${origin}/api/points`;
+  } catch {
+    // ignore
+  }
+  return PROD_API_BASE ? `${PROD_API_BASE}/api/points` : null;
+}
+
+async function callApi(action, body = {}) {
+  const url = getApiUrl();
+  if (!url) {
+    return { ok: false, code: "NO_SERVER", message: "Server URL is not set." };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const token = await shopify.sessionToken.get();
+    // Token body mein + "text/plain": isse browser ka extra "preflight" check nahi hota
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ action, token, ...body }),
+      signal: controller.signal,
+    });
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+    return (
+      data || { ok: false, code: "BAD_RESPONSE", message: "Something went wrong. Please try again." }
+    );
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      return { ok: false, code: "TIMEOUT", message: "The request took too long. Please try again." };
+    }
+    return {
+      ok: false,
+      code: "NETWORK",
+      message: SHOW_DEBUG ? `Couldn't connect to ${url}` : "Couldn't connect. Please try again.",
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function readSaved() {
+  try {
+    return (await shopify.storage.read(STORAGE_KEY)) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeSaved(value) {
+  try {
+    await shopify.storage.write(STORAGE_KEY, value);
+  } catch {
+    // ignore
+  }
+}
+
+async function clearSaved() {
+  try {
+    await shopify.storage.delete(STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+function formatNum(n) {
+  try {
+    return shopify.i18n.formatNumber(Number(n || 0));
+  } catch {
+    return String(n);
+  }
+}
+
+function formatINR(n) {
+  return `${Number(n || 0).toFixed(2)} INR`;
+}
+
+function isGiftCardApplied(appliedGiftCards, code) {
+  if (!code) return false;
+  const last4 = String(code).slice(-4).toLowerCase();
+  return (appliedGiftCards || []).some(
+    (g) => String(g?.lastCharacters || "").toLowerCase() === last4,
+  );
+}
+
+function canUpdateAttributes() {
+  return shopify.instructions.value?.attributes?.canUpdateAttributes !== false;
+}
+
+async function setOrderAttributes(r) {
+  if (!canUpdateAttributes()) return;
+  const pairs = [
+    [ATTR_KEYS.points, r.pointsRedeemed],
+    [ATTR_KEYS.amount, r.amountRedeemed],
+    [ATTR_KEYS.invoice, r.invoiceNumber],
+    [ATTR_KEYS.approval, r.approvalCode],
+    [ATTR_KEYS.batch, r.currentBatchNumber],
+    [ATTR_KEYS.date, r.transactionDate],
+    [ATTR_KEYS.bill, r.billAmount],
+    [ATTR_KEYS.toPay, r.amountToPay],
+  ];
+  for (const [key, value] of pairs) {
+    if (value === undefined || value === null || value === "") continue;
+    try {
+      await shopify.applyAttributeChange({ type: "updateAttribute", key, value: String(value) });
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function clearOrderAttributes() {
+  if (!canUpdateAttributes()) return;
+  for (const key of Object.values(ATTR_KEYS)) {
+    try {
+      await shopify.applyAttributeChange({ type: "removeAttribute", key });
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// ================== Box ==================
+
+function Extension() {
+  const lines = shopify.lines.value || [];
+  const appliedGiftCards = shopify.appliedGiftCards.value || [];
+  const totalMoney = shopify.cost.totalAmount.value;
+  const instructions = shopify.instructions.value;
+  const checkoutToken = shopify.checkoutToken?.value || null;
+
+  const [loading, setLoading] = useState(true);
+  const [balance, setBalance] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const [pointsInput, setPointsInput] = useState("");
+  const [fieldError, setFieldError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [active, setActive] = useState(null);
+  // OTP: { points, maskedPhone, dummy } jab OTP bhej diya gaya ho
+  const [otpStage, setOtpStage] = useState(null);
+  const [otpInput, setOtpInput] = useState("");
+  const [otpError, setOtpError] = useState("");
+  const [resendIn, setResendIn] = useState(0);
+
+  const busyRef = useRef(false); // double click / double redeem lock
+  const activeRef = useRef(null);
+  const seenAppliedRef = useRef(false);
+  const missRef = useRef(0);
+  const loadedRef = useRef(false);
+  const restoredRef = useRef(false);
+
+  function setBusyBoth(v) {
+    busyRef.current = v;
+    setBusy(v);
+  }
+  function setActiveBoth(v) {
+    activeRef.current = v;
+    setActive(v);
+  }
+
+  // ---------- Box chhupane wale rules (wallet jaise) ----------
+  const hasGiftCardProduct = lines.some(
+    (l) =>
+      String(l?.merchandise?.product?.productType || "").trim().toLowerCase() ===
+      GIFT_CARD_PRODUCT_TYPE,
+  );
+  const canAddGiftCard = instructions?.giftCards?.canAddGiftCard !== false;
+  const isINR = (totalMoney?.currencyCode || "INR") === "INR";
+  const hidden = hasGiftCardProduct || !canAddGiftCard || !isINR;
+
+  // ---------- Bill mein kitna bacha (wallet gift card laga ho to wo minus) ----------
+  const total = Number(totalMoney?.amount || 0);
+  const giftCardsUsed = appliedGiftCards.reduce(
+    (sum, g) => sum + Number(g?.amountUsed?.amount || 0),
+    0,
+  );
+  const remaining = Math.max(0, Math.round((total - giftCardsUsed) * 100) / 100);
+
+  const rate = Number(balance?.rupeePerPoint || 0);
+  const minPoints = Number(balance?.minRedeemPoints || 0);
+  const availablePoints = Number(balance?.points || 0);
+  const maxByBill = rate > 0 ? Math.floor((remaining + 1e-9) / rate) : 0;
+  const maxPoints = Math.max(0, Math.min(availablePoints, maxByBill));
+
+  async function loadBalance() {
+    setLoading(true);
+    const res = await callApi("balance");
+    if (res.ok) {
+      setBalance(res);
+      setLoadError(null);
+    } else {
+      setBalance(null);
+      setLoadError({ code: res.code, message: res.message });
+    }
+    setLoading(false);
+  }
+
+  // 1) Points load
+  useEffect(() => {
+    if (!hidden && !loadedRef.current) {
+      loadedRef.current = true;
+      loadBalance();
+    }
+  }, [hidden]);
+
+  // 2) Page reload ke baad laga hua redeem wapas dikhao
+  useEffect(() => {
+    if (restoredRef.current || !checkoutToken) return;
+    restoredRef.current = true;
+    (async () => {
+      const saved = await readSaved();
+      if (!saved?.redemptionId) return;
+      if (saved.checkoutToken !== checkoutToken) {
+        await clearSaved(); // purane checkout ka data
+        return;
+      }
+      if (!activeRef.current) {
+        seenAppliedRef.current = false;
+        missRef.current = 0;
+        setActiveBoth(saved);
+      }
+    })();
+  }, [checkoutToken]);
+
+  // 3) Customer ne payment section se gift card hata diya -> turant points wapas
+  useEffect(() => {
+    const a = activeRef.current;
+    if (!a || busyRef.current) return;
+    if (isGiftCardApplied(appliedGiftCards, a.giftCardCode)) {
+      seenAppliedRef.current = true;
+      missRef.current = 0;
+    } else if (seenAppliedRef.current) {
+      removeRedemption({ alreadyRemoved: true });
+    }
+  }, [appliedGiftCards, active]);
+
+  // 4) Har 20 sec ping
+  useEffect(() => {
+    if (!active?.redemptionId) return undefined;
+    const tick = async () => {
+      const a = activeRef.current;
+      if (!a || busyRef.current) return;
+      if (!isGiftCardApplied(shopify.appliedGiftCards.value, a.giftCardCode)) {
+        missRef.current += 1;
+        if (missRef.current >= 2) await removeRedemption({ alreadyRemoved: true });
+        return;
+      }
+      missRef.current = 0;
+      const res = await callApi("ping", { redemptionId: a.redemptionId });
+      if (res.ok && res.alive === false) {
+        await removeRedemption({
+          skipCancel: true,
+          message: "Your points session expired and the points were returned. You can apply them again.",
+        });
+      }
+    };
+    tick();
+    const id = setInterval(tick, PING_EVERY_MS);
+    return () => clearInterval(id);
+  }, [active?.redemptionId]);
+
+  // 5) Gift card product cart mein aa gaya -> points hatao
+  useEffect(() => {
+    if (hidden && activeRef.current && !busyRef.current) {
+      removeRedemption({ message: "Loyalty points were removed because they can't be used on this order." });
+    }
+  }, [hidden, active]);
+
+  // ---------- OTP resend ka countdown ----------
+  useEffect(() => {
+    if (resendIn <= 0) return undefined;
+    const id = setTimeout(() => setResendIn((n) => Math.max(0, n - 1)), 1000);
+    return () => clearTimeout(id);
+  }, [resendIn]);
+
+  // ---------- Points field check ----------
+  function readPointsOrError() {
+    setFieldError("");
+    const pts = Number(String(pointsInput || "").trim());
+    if (!Number.isInteger(pts) || pts <= 0) {
+      setFieldError("Enter a valid number of points.");
+      return null;
+    }
+    if (pts < minPoints) {
+      setFieldError(`Minimum ${formatNum(minPoints)} points can be redeemed.`);
+      return null;
+    }
+    if (pts > maxPoints) {
+      setFieldError(`You can redeem up to ${formatNum(maxPoints)} points on this order.`);
+      return null;
+    }
+    return pts;
+  }
+
+  // ---------- Pehla button: OTP chahiye to "Send OTP", warna seedha redeem ----------
+  async function onApply() {
+    if (busyRef.current || activeRef.current) return;
+    if (balance?.otpRequired && resendIn > 0) return; // 30 sec ka intezaar
+    setNotice(null);
+    const pts = readPointsOrError();
+    if (pts === null) return;
+    if (balance?.otpRequired) {
+      await sendOtpFor(pts);
+    } else {
+      await doRedeem(pts, null);
+    }
+  }
+
+  // ---------- OTP bhejo (pehli baar ya resend) ----------
+  async function sendOtpFor(pts) {
+    if (busyRef.current) return;
+    setBusyBoth(true);
+    try {
+      const res = await callApi("sendOtp", { points: pts, billAmount: remaining, checkoutToken });
+      if (!res.ok) {
+        if (otpStage) {
+          setOtpError(res.message || "Couldn't send OTP. Please try again.");
+        } else {
+          setNotice({ tone: "critical", text: res.message || "Couldn't send OTP. Please try again." });
+        }
+        return;
+      }
+      setOtpStage({ points: pts, maskedPhone: res.maskedPhone, dummy: res.dummy === true });
+      setOtpInput("");
+      setOtpError("");
+      setResendIn(Number(res.resendAfterSec || 30));
+    } finally {
+      setBusyBoth(false);
+    }
+  }
+
+  async function onResendOtp() {
+    if (!otpStage || resendIn > 0 || busyRef.current) return;
+    await sendOtpFor(otpStage.points);
+  }
+
+  function onChangePoints() {
+    if (busyRef.current) return;
+    setOtpStage(null);
+    setOtpInput("");
+    setOtpError("");
+    // resendIn reset nahi karte: server 30 sec se pehle naya OTP nahi bhejta
+  }
+
+  async function onVerifyAndApply() {
+    if (!otpStage || busyRef.current) return;
+    const code = String(otpInput || "").trim();
+    if (!/^\d{4}$/.test(code)) {
+      setOtpError("Enter the 4-digit OTP.");
+      return;
+    }
+    await doRedeem(otpStage.points, code);
+  }
+
+  // ---------- Redeem (OTP ke saath) ----------
+  async function doRedeem(pts, otp) {
+    if (busyRef.current || activeRef.current) return;
+    setBusyBoth(true);
+    try {
+      const res = await callApi("redeem", { points: pts, billAmount: remaining, checkoutToken, otp });
+      if (!res.ok) {
+        // OTP galat / expire / lock -> OTP wale screen pe hi message
+        if (["OTP_INVALID", "OTP_LOCKED", "OTP_EXPIRED", "OTP_REQUIRED"].includes(res.code) && otpStage) {
+          setOtpInput("");
+          setOtpError(res.message || "Incorrect OTP.");
+          return;
+        }
+        setOtpStage(null);
+        setNotice({
+          tone: "critical",
+          text:
+            res.code === "TIMEOUT"
+              ? "We couldn't confirm your points. If any points were deducted, they will be returned within 15 minutes."
+              : res.message || "Couldn't redeem points. Please try again.",
+        });
+        await loadBalance();
+        return;
+      }
+
+      const record = {
+        redemptionId: res.redemptionId,
+        giftCardCode: res.giftCardCode,
+        pointsRedeemed: res.pointsRedeemed,
+        amountRedeemed: res.amountRedeemed,
+        invoiceNumber: res.invoiceNumber,
+        approvalCode: res.approvalCode,
+        currentBatchNumber: res.currentBatchNumber,
+        transactionDate: res.transactionDate,
+        billAmount: res.billAmount,
+        amountToPay: res.amountToPay,
+        checkoutToken,
+      };
+      await writeSaved(record);
+
+      // Gift card checkout pe lagao (wallet jaisa)
+      const applyRes = await shopify.applyGiftCardChange({
+        type: "addGiftCard",
+        code: record.giftCardCode,
+      });
+      if (applyRes?.type === "error") {
+        await callApi("cancel", { redemptionId: record.redemptionId });
+        await clearSaved();
+        setOtpStage(null);
+        setNotice({
+          tone: "critical",
+          text: "Couldn't apply your points to this order. Your points will be returned.",
+        });
+        await loadBalance();
+        return;
+      }
+
+      seenAppliedRef.current = false;
+      missRef.current = 0;
+      setActiveBoth(record);
+      setPointsInput("");
+      setOtpStage(null);
+      setOtpInput("");
+      setOtpError("");
+      await setOrderAttributes(record);
+    } finally {
+      setBusyBoth(false);
+    }
+  }
+
+  // ---------- Remove ----------
+  async function removeRedemption({ alreadyRemoved = false, skipCancel = false, message = "" } = {}) {
+    const a = activeRef.current;
+    if (!a || busyRef.current) return;
+    setBusyBoth(true);
+    try {
+      if (!alreadyRemoved && isGiftCardApplied(shopify.appliedGiftCards.value, a.giftCardCode)) {
+        const r = await shopify.applyGiftCardChange({ type: "removeGiftCard", code: a.giftCardCode });
+        if (r?.type === "error") {
+          setNotice({ tone: "critical", text: "Couldn't remove your points. Please try again." });
+          return;
+        }
+      }
+      let cancelOk = true;
+      if (!skipCancel) {
+        const res = await callApi("cancel", { redemptionId: a.redemptionId });
+        cancelOk = !!res.ok;
+      }
+      await clearOrderAttributes();
+      await clearSaved();
+      seenAppliedRef.current = false;
+      missRef.current = 0;
+      setActiveBoth(null);
+
+      if (message) {
+        setNotice({ tone: "info", text: message });
+      } else if (!cancelOk) {
+        setNotice({ tone: "warning", text: "Points removed. They will be back in your account within 15 minutes." });
+      } else {
+        setNotice(null);
+      }
+      await loadBalance();
+    } finally {
+      setBusyBoth(false);
+    }
+  }
+
+  // ================== Screen (screenshot jaisa) ==================
+
+  if (hidden) return null;
+
+  let content;
+
+  if (active) {
+    content = (
+      <s-stack key="applied" gap="base">
+        <s-banner tone="success" heading={`${formatNum(active.pointsRedeemed)} points applied`}>
+          <s-text>≈ {formatINR(active.amountRedeemed)} applied as a gift card on this order.</s-text>
+        </s-banner>
+        <s-button variant="secondary" inlineSize="fill" loading={busy} disabled={busy} onClick={() => removeRedemption()}>
+          Remove
+        </s-button>
+      </s-stack>
+    );
+  } else if (loading && !balance) {
+    content = <s-spinner accessibilityLabel="Loading points" />;
+  } else if (loadError?.code === "NOT_LOGGED_IN") {
+    content = <s-text color="subdued">Log in to use your loyalty points.</s-text>;
+  } else if (loadError || !balance) {
+    content = (
+      <s-stack key="error" gap="base">
+        <s-banner tone="critical">{loadError?.message || "Couldn't load your points."}</s-banner>
+        <s-button variant="secondary" inlineSize="fill" loading={loading} onClick={() => loadBalance()}>
+          Try again
+        </s-button>
+      </s-stack>
+    );
+  } else if (otpStage) {
+    content = (
+      <s-stack key="otp" gap="base">
+        <s-text>
+          Redeeming {formatNum(otpStage.points)} points (≈ {formatINR(otpStage.points * rate)})
+        </s-text>
+        <s-text>Enter the OTP sent to {otpStage.maskedPhone}</s-text>
+        {SHOW_DEBUG && otpStage.dummy && (
+          <s-text color="subdued">Demo mode: OTP is 1234</s-text>
+        )}
+        <s-text-field
+          label="OTP"
+          value={otpInput}
+          maxLength={4}
+          error={otpError || undefined}
+          disabled={busy}
+          onInput={(e) => {
+            const v = String(e.currentTarget?.value ?? e.target?.value ?? "").replace(/\D/g, "").slice(0, 4);
+            setOtpInput(v);
+            setOtpError("");
+          }}
+        />
+        <s-button
+          variant="secondary"
+          inlineSize="fill"
+          loading={busy}
+          disabled={busy || otpInput.length < 4}
+          onClick={onVerifyAndApply}
+        >
+          Verify & Apply
+        </s-button>
+        <s-link onClick={onResendOtp}>
+          {resendIn > 0 ? `Resend OTP in ${resendIn}s` : "Resend OTP"}
+        </s-link>
+        <s-link onClick={onChangePoints}>Change points</s-link>
+      </s-stack>
+    );
+  } else {
+    content = (
+      <s-stack key="form" gap="base">
+        <s-text>Total points: {formatNum(availablePoints)}</s-text>
+        <s-text>
+          You can redeem up to {formatNum(maxPoints)} points (≈ {formatINR(maxPoints * rate)}) on this order.
+        </s-text>
+        <s-number-field
+          label="Points to redeem"
+          value={pointsInput}
+          min={minPoints}
+          max={maxPoints}
+          step={1}
+          error={fieldError || undefined}
+          disabled={busy || maxPoints < minPoints}
+          onInput={(e) => {
+            setPointsInput(e.currentTarget?.value ?? e.target?.value ?? "");
+            setFieldError("");
+          }}
+        />
+        <s-button
+          variant="secondary"
+          inlineSize="fill"
+          loading={busy}
+          disabled={busy || !pointsInput || (balance?.otpRequired && resendIn > 0)}
+          onClick={onApply}
+        >
+          {balance?.otpRequired
+            ? resendIn > 0
+              ? `Send OTP (${resendIn}s)`
+              : "Send OTP"
+            : "Apply"}
+        </s-button>
+      </s-stack>
+    );
+  }
+
+  return (
+    <s-box border="base" borderRadius="base" padding="base">
+      <s-stack gap="base">
+        <s-heading>Fabcoins </s-heading>
+        {content}
+        {notice && <s-banner tone={notice.tone}>{notice.text}</s-banner>}
+      </s-stack>
+    </s-box>
+  );
+}
