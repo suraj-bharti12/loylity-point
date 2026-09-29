@@ -19,17 +19,25 @@ const REQUEST_TIMEOUT_MS = 30 * 1000;
 const STORAGE_KEY = "loyalty_points_redemption_v1";
 const GIFT_CARD_PRODUCT_TYPE = "gift cards";
 
-// Order "Additional details" keys (wallet wali keys se alag)
+// Order notes ("Additional details") keys
 const ATTR_KEYS = {
-  points: "PointsRedeemed",
-  amount: "PointsAmountRedeemed",
-  invoice: "PointsInvoiceNumber",
-  approval: "PointsApprovalCode",
-  batch: "PointsBatchNumber",
-  date: "PointsTransactionDate",
-  bill: "PointsBillAmount",
-  toPay: "PointsAmountToPay",
+  referenceId: "loyalty_referenceId",
+  points: "loyalty_points",
+  billNo: "loyalty_billno",
+  totalNet: "loyalty_totalnet",
+  gross: "loyalty_gross_amount",
 };
+// Purane test wali keys (Remove pe ye bhi saaf ho jayengi)
+const LEGACY_ATTR_KEYS = [
+  "PointsRedeemed",
+  "PointsAmountRedeemed",
+  "PointsInvoiceNumber",
+  "PointsApprovalCode",
+  "PointsBatchNumber",
+  "PointsTransactionDate",
+  "PointsBillAmount",
+  "PointsAmountToPay",
+];
 
 export default async () => {
   render(<Extension />, document.body);
@@ -162,14 +170,11 @@ function canUpdateAttributes() {
 async function setOrderAttributes(r) {
   if (!canUpdateAttributes()) return;
   const pairs = [
+    [ATTR_KEYS.referenceId, r.referenceId],
     [ATTR_KEYS.points, r.pointsRedeemed],
-    [ATTR_KEYS.amount, r.amountRedeemed],
-    [ATTR_KEYS.invoice, r.invoiceNumber],
-    [ATTR_KEYS.approval, r.approvalCode],
-    [ATTR_KEYS.batch, r.currentBatchNumber],
-    [ATTR_KEYS.date, r.transactionDate],
-    [ATTR_KEYS.bill, r.billAmount],
-    [ATTR_KEYS.toPay, r.amountToPay],
+    [ATTR_KEYS.billNo, r.billNo],
+    [ATTR_KEYS.totalNet, r.totalNetAmount],
+    [ATTR_KEYS.gross, r.totalGrossAmount],
   ];
   for (const [key, value] of pairs) {
     if (value === undefined || value === null || value === "") continue;
@@ -183,7 +188,7 @@ async function setOrderAttributes(r) {
 
 async function clearOrderAttributes() {
   if (!canUpdateAttributes()) return;
-  for (const key of Object.values(ATTR_KEYS)) {
+  for (const key of [...Object.values(ATTR_KEYS), ...LEGACY_ATTR_KEYS]) {
     try {
       await shopify.applyAttributeChange({ type: "removeAttribute", key });
     } catch {
@@ -467,6 +472,10 @@ function Extension() {
         transactionDate: res.transactionDate,
         billAmount: res.billAmount,
         amountToPay: res.amountToPay,
+        referenceId: res.referenceId,
+        billNo: res.billNo,
+        totalNetAmount: res.totalNetAmount,
+        totalGrossAmount: res.totalGrossAmount,
         checkoutToken,
       };
       await writeSaved(record);
@@ -645,7 +654,7 @@ function Extension() {
   return (
     <s-box border="base" borderRadius="base" padding="base">
       <s-stack gap="base">
-        <s-heading>Redeem loyalty points</s-heading>
+        <s-heading>Fabcoins</s-heading>
         {content}
         {notice && <s-banner tone={notice.tone}>{notice.text}</s-banner>}
       </s-stack>

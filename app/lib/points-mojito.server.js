@@ -176,6 +176,18 @@ function toCartItems(cart) {
   });
 }
 
+// Mojito ke totalNetAmount / totalGrossAmount (block request aur order notes dono mein yahi)
+export function computeTotals(cart, billAmount) {
+  const cartItems = toCartItems(cart);
+  const totalNetAmount = cartItems.length
+    ? round2(cartItems.reduce((s, c) => s + c.productNetAmount, 0))
+    : round2(billAmount);
+  const totalGrossAmount = cartItems.length
+    ? round2(cartItems.reduce((s, c) => s + c.productGrossAmount, 0))
+    : totalNetAmount;
+  return { cartItems, totalNetAmount, totalGrossAmount };
+}
+
 // Har block ke liye alag bill number (15 digit)
 function makeBillNo() {
   return Number(`${Date.now()}${crypto.randomInt(10, 100)}`);
@@ -183,13 +195,7 @@ function makeBillNo() {
 
 async function liveBlock({ phone, points, billAmount, cart }) {
   const billNo = makeBillNo();
-  const cartItems = toCartItems(cart);
-  const totalNet = cartItems.length
-    ? round2(cartItems.reduce((s, c) => s + c.productNetAmount, 0))
-    : round2(billAmount);
-  const totalGross = cartItems.length
-    ? round2(cartItems.reduce((s, c) => s + c.productGrossAmount, 0))
-    : totalNet;
+  const { cartItems, totalNetAmount: totalNet, totalGrossAmount: totalGross } = computeTotals(cart, billAmount);
 
   const payload = {
     customerPhone: String(phone),
@@ -234,6 +240,8 @@ async function liveBlock({ phone, points, billAmount, cart }) {
     currentBatchNumber: "",
     pointsRedeemed,
     amountRedeemed,
+    totalNetAmount: totalNet,
+    totalGrossAmount: totalGross,
     balanceAfter: null,
     transactionDate: nowIST(),
     duplicate: false,
@@ -323,14 +331,17 @@ export async function redeemPoints({ memberId, points, requestId, billAmount, ca
     throw new PointsApiError(`Itne points nahi hain (balance: ${balance})`, "INSUFFICIENT_POINTS");
   }
   dummyBalances.set(id, balance - pts);
-  const invoiceNumber = `PTS-DUMMY-${Date.now()}-${crypto.randomInt(1000, 10000)}`;
+  const invoiceNumber = `DUMMY${crypto.randomInt(10000, 100000)}`;
+  const totals = computeTotals(cart, billAmount);
   const result = {
     memberId: id,
     invoiceNumber,
-    approvalCode: String(crypto.randomInt(100000, 1000000)),
+    approvalCode: String(makeBillNo()),
     currentBatchNumber: "DUMMYBATCH001",
     pointsRedeemed: pts,
     amountRedeemed: pointsToRupees(pts),
+    totalNetAmount: totals.totalNetAmount,
+    totalGrossAmount: totals.totalGrossAmount,
     balanceAfter: balance - pts,
     transactionDate: nowIST(),
     duplicate: false,

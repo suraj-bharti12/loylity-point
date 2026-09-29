@@ -595,6 +595,11 @@ async function redeem({ shop, customerGid, points, billAmount, checkoutToken, ot
     billAmount: bill,
     amountToPay,
     balanceAfter: r.balanceAfter,
+    // Order notes (loyalty_*) ke liye - Mojito ko jo bheja wahi
+    referenceId: r.invoiceNumber,
+    billNo: r.approvalCode,
+    totalNetAmount: r.totalNetAmount,
+    totalGrossAmount: r.totalGrossAmount,
   };
 }
 
