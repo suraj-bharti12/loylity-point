@@ -17,7 +17,9 @@ const SHOW_DEBUG = true;
 const PING_EVERY_MS = 20 * 1000;
 const REQUEST_TIMEOUT_MS = 30 * 1000;
 const STORAGE_KEY = "loyalty_points_redemption_v1";
-const GIFT_CARD_PRODUCT_TYPE = "gift cards";
+// Cart mein in product types ka koi item ho to Fabcoins box nahi dikhega
+// (chhote/bade letters se farak nahi padta; naya type jodna ho to bas yahan likh do)
+const HIDE_FOR_PRODUCT_TYPES = ["gift cards", "custom kurta"];
 
 // Order notes ("Additional details") keys
 const ATTR_KEYS = {
@@ -27,6 +29,10 @@ const ATTR_KEYS = {
   totalNet: "loyalty_totalnet",
   gross: "loyalty_gross_amount",
 };
+// Chhupa hua note ("_" se customer ko nahi dikhta): points wale gift card ke last 4 characters.
+// Payment breakup extension isi se points ko LOYALTYPOINTS aur wallet ko GIFTCARDWALLET mein alag karta hai.
+const LOYALTY_GC_ATTR = "_loyalty_giftcard_last4";
+
 // Purane test wali keys (Remove pe ye bhi saaf ho jayengi)
 const LEGACY_ATTR_KEYS = [
   "PointsRedeemed",
@@ -175,6 +181,7 @@ async function setOrderAttributes(r) {
     [ATTR_KEYS.billNo, r.billNo],
     [ATTR_KEYS.totalNet, r.totalNetAmount],
     [ATTR_KEYS.gross, r.totalGrossAmount],
+    [LOYALTY_GC_ATTR, String(r.giftCardCode || "").slice(-4)],
   ];
   for (const [key, value] of pairs) {
     if (value === undefined || value === null || value === "") continue;
@@ -188,7 +195,7 @@ async function setOrderAttributes(r) {
 
 async function clearOrderAttributes() {
   if (!canUpdateAttributes()) return;
-  for (const key of [...Object.values(ATTR_KEYS), ...LEGACY_ATTR_KEYS]) {
+  for (const key of [...Object.values(ATTR_KEYS), LOYALTY_GC_ATTR, ...LEGACY_ATTR_KEYS]) {
     try {
       await shopify.applyAttributeChange({ type: "removeAttribute", key });
     } catch {
@@ -237,14 +244,14 @@ function Extension() {
   }
 
   // ---------- Box chhupane wale rules (wallet jaise) ----------
-  const hasGiftCardProduct = lines.some(
-    (l) =>
-      String(l?.merchandise?.product?.productType || "").trim().toLowerCase() ===
-      GIFT_CARD_PRODUCT_TYPE,
+  const hasBlockedProduct = lines.some((l) =>
+    HIDE_FOR_PRODUCT_TYPES.includes(
+      String(l?.merchandise?.product?.productType || "").trim().toLowerCase(),
+    ),
   );
   const canAddGiftCard = instructions?.giftCards?.canAddGiftCard !== false;
   const isINR = (totalMoney?.currencyCode || "INR") === "INR";
-  const hidden = hasGiftCardProduct || !canAddGiftCard || !isINR;
+  const hidden = hasBlockedProduct || !canAddGiftCard || !isINR;
 
   // ---------- Bill mein kitna bacha (wallet gift card laga ho to wo minus) ----------
   const total = Number(totalMoney?.amount || 0);
@@ -337,7 +344,7 @@ function Extension() {
     return () => clearInterval(id);
   }, [active?.redemptionId]);
 
-  // 5) Gift card product cart mein aa gaya -> points hatao
+  // 5) Gift card / Custom kurta cart mein aa gaya -> points hatao
   useEffect(() => {
     if (hidden && activeRef.current && !busyRef.current) {
       removeRedemption({ message: "Loyalty points were removed because they can't be used on this order." });
