@@ -8,6 +8,7 @@ import { useState, useEffect, useRef } from "preact/hooks";
 // Agar box mein "Server URL is not set" aaye, to terminal wala trycloudflare URL
 // MANUAL_API_BASE mein daal do (end mein / nahi).
 const MANUAL_API_BASE = "";
+// Live ke liye (baad mein): naye app ke asli server ka URL
 const PROD_API_BASE = "https://loylity-point.onrender.com";
 
 // Testing ke time error mein server URL dikhao (live se pehle false kar dena)
@@ -128,6 +129,30 @@ function isGiftCardApplied(appliedGiftCards, code) {
   return (appliedGiftCards || []).some(
     (g) => String(g?.lastCharacters || "").toLowerCase() === last4,
   );
+}
+
+// Mojito ko bhejne ke liye cart ki details
+function buildCart() {
+  const lines = shopify.lines.value || [];
+  return {
+    items: lines.map((l) => {
+      const net = Number(l?.cost?.totalAmount?.amount || 0);
+      const discount = (l?.discountAllocations || []).reduce(
+        (sum, d) => sum + Number(d?.discountedAmount?.amount || 0),
+        0,
+      );
+      return {
+        lineItemId: String(l?.id || ""),
+        variantId: String(l?.merchandise?.id || ""),
+        productId: String(l?.merchandise?.product?.id || ""),
+        sku: String(l?.merchandise?.sku || ""),
+        name: String(l?.merchandise?.title || ""),
+        quantity: Number(l?.quantity || 0),
+        netAmount: net,
+        discount,
+      };
+    }),
+  };
 }
 
 function canUpdateAttributes() {
@@ -405,7 +430,13 @@ function Extension() {
     if (busyRef.current || activeRef.current) return;
     setBusyBoth(true);
     try {
-      const res = await callApi("redeem", { points: pts, billAmount: remaining, checkoutToken, otp });
+      const res = await callApi("redeem", {
+        points: pts,
+        billAmount: remaining,
+        checkoutToken,
+        otp,
+        cart: buildCart(),
+      });
       if (!res.ok) {
         // OTP galat / expire / lock -> OTP wale screen pe hi message
         if (["OTP_INVALID", "OTP_LOCKED", "OTP_EXPIRED", "OTP_REQUIRED"].includes(res.code) && otpStage) {
@@ -614,7 +645,7 @@ function Extension() {
   return (
     <s-box border="base" borderRadius="base" padding="base">
       <s-stack gap="base">
-        <s-heading>Fabcoins </s-heading>
+        <s-heading>Redeem loyalty points</s-heading>
         {content}
         {notice && <s-banner tone={notice.tone}>{notice.text}</s-banner>}
       </s-stack>

@@ -16,6 +16,8 @@ import {
   getPointsConfig,
   rupeesToMaxPoints,
   PointsApiError,
+  isPointsDummy,
+  phoneTo10,
 } from "./points-mojito.server";
 import { sendOtp, verifyOtp, normalizeIndianPhone, maskPhone, isOtpDummy } from "./otp.server";
 
@@ -54,11 +56,7 @@ function round2(n) {
   return Math.round(Number(n) * 100) / 100;
 }
 
-// DUMMY: abhi Shopify customer ka number hi memberId hai.
-// Asli API mein yahan mobile number / loyalty card number aayega.
-function memberIdFromCustomer(customerGid) {
-  return String(customerGid).split("/").pop();
-}
+
 
 // Dummy / asli API ke errors ko customer ke samajhne layak message mein badlo
 function apiErrorToFail(err) {
@@ -70,7 +68,14 @@ function apiErrorToFail(err) {
       case "BELOW_MINIMUM":
         return fail(err.code, `Minimum ${cfg.minRedeemPoints} points can be redeemed.`);
       case "API_ERROR":
-        return fail(err.code, "Loyalty service is not available right now. Please try again.");
+      case "CONFIG":
+        return fail(err.code, devMsg("Loyalty service is not available right now. Please try again.", err.message));
+      case "TIMEOUT":
+        return fail(err.code, "Loyalty service is taking too long. Please try again.");
+      case "NOT_MEMBER":
+        return fail(err.code, devMsg("No loyalty account found for your mobile number.", err.message));
+      case "API_REJECTED":
+        return fail(err.code, err.message || "Couldn't process your points. Please try again.");
       default:
         return fail(err.code || "API_ERROR", "Couldn't process your points. Please try again.");
     }
@@ -187,6 +192,31 @@ async function getCustomerPhone(shop, customerGid) {
   return { phone: null, error: lastError };
 }
 
+// Customer ka phone 5 min tak yaad rakho (baar-baar Shopify se na mangna pade)
+const phoneCache = new Map(); // customerGid -> { phone, at }
+async function getCustomerPhoneCached(shop, customerGid) {
+  const c = phoneCache.get(customerGid);
+  if (c && Date.now() - c.at < 5 * 60 * 1000) return { phone: c.phone, error: null };
+  const r = await getCustomerPhone(shop, customerGid);
+  if (r.phone) phoneCache.set(customerGid, { phone: r.phone, at: Date.now() });
+  return r;
+}
+
+// Mojito member = customer ka 10 digit mobile (dummy mode mein Shopify customer number)
+async function resolveMemberId(shop, customerGid) {
+  if (isPointsDummy()) {
+    return { memberId: String(customerGid).split("/").pop() };
+  }
+  const { phone, error } = await getCustomerPhoneCached(shop, customerGid);
+  const memberId = phoneTo10(phone);
+  if (!memberId) {
+    return {
+      fail: fail("NO_PHONE", devMsg("Add a mobile number to your account to use loyalty points.", error)),
+    };
+  }
+  return { memberId };
+}
+
 // Redeem / OTP dono se pehle points ki basic jaanch
 function validateRedeemInput(pts, bill) {
   const cfg = getPointsConfig();
@@ -239,7 +269,11 @@ export async function reverseRedemption(row, finalStatus = "reversed") {
   // 2) Points wapas
   if (row.invoiceNumber) {
     try {
-      await cancelPointsRedeem({ invoiceNumber: row.invoiceNumber });
+      await cancelPointsRedeem({
+        invoiceNumber: row.invoiceNumber,
+        memberId: row.memberId,
+        points: row.pointsRedeemed ?? row.pointsRequested,
+      });
     } catch (err) {
       // Gift card band ho gaya par points wapas nahi hue -> haath se check
       await prisma.pointsRedemption.update({
@@ -322,9 +356,11 @@ async function settleOldRedemptions({ customerGid, checkoutToken }) {
 
 // ---------------- Actions ----------------
 
-async function getBalance(customerGid) {
+async function getBalance(shop, customerGid) {
+  const m = await resolveMemberId(shop, customerGid);
+  if (m.fail) return m.fail;
   try {
-    const b = await fetchPointsBalance({ memberId: memberIdFromCustomer(customerGid) });
+    const b = await fetchPointsBalance({ memberId: m.memberId });
     return {
       ok: true,
       points: b.points,
@@ -350,8 +386,10 @@ async function sendRedeemOtp({ shop, customerGid, points, billAmount, checkoutTo
   if (blocked) return blocked;
 
   // Itne points hain bhi? (OTP bhejne se pehle hi bata do)
+  const m = await resolveMemberId(shop, customerGid);
+  if (m.fail) return m.fail;
   try {
-    const b = await fetchPointsBalance({ memberId: memberIdFromCustomer(customerGid) });
+    const b = await fetchPointsBalance({ memberId: m.memberId });
     if (pts > b.points) return fail("INSUFFICIENT_POINTS", "You don't have enough points.");
   } catch (err) {
     return apiErrorToFail(err);
@@ -370,7 +408,7 @@ async function sendRedeemOtp({ shop, customerGid, points, billAmount, checkoutTo
   }
 
   // Mobile number profile se
-  let { phone, error } = await getCustomerPhone(shop, customerGid);
+  let { phone, error } = await getCustomerPhoneCached(shop, customerGid);
   if (!phone && isOtpDummy()) {
     console.warn("[otp] customer phone nahi mila, DUMMY mode mein test number use:", error || "no phone");
     phone = "910000000000";
@@ -436,13 +474,16 @@ async function checkRedeemOtp(customerGid, otp) {
   return null;
 }
 
-async function redeem({ shop, customerGid, points, billAmount, checkoutToken, otp }) {
+async function redeem({ shop, customerGid, points, billAmount, checkoutToken, otp, cart }) {
   const pts = Number(points);
   const bill = round2(billAmount);
-  const memberId = memberIdFromCustomer(customerGid);
 
   const bad = validateRedeemInput(pts, bill);
   if (bad) return bad;
+
+  const m = await resolveMemberId(shop, customerGid);
+  if (m.fail) return m.fail;
+  const memberId = m.memberId;
 
   // Double redeem lock + purane redeem suljhao
   const blocked = await settleOldRedemptions({ customerGid, checkoutToken });
@@ -467,11 +508,17 @@ async function redeem({ shop, customerGid, points, billAmount, checkoutToken, ot
   // 1) Points kaato
   let r;
   try {
-    r = await redeemPoints({ memberId, points: pts, requestId: row.id });
+    r = await redeemPoints({ memberId, points: pts, requestId: row.id, billAmount: bill, cart });
   } catch (err) {
+    // Timeout: ho sakta hai points block ho gaye hon -> haath se check
+    const unsure = err?.code === "TIMEOUT";
     await prisma.pointsRedemption.update({
       where: { id: row.id },
-      data: { status: "failed", errorMessage: String(err?.message || err) },
+      data: {
+        status: unsure ? "check_needed" : "failed",
+        approvalCode: err?.billNo ? String(err.billNo) : null,
+        errorMessage: String(err?.message || err),
+      },
     });
     return apiErrorToFail(err);
   }
@@ -496,7 +543,7 @@ async function redeem({ shop, customerGid, points, billAmount, checkoutToken, ot
     // Gift card nahi bana -> points turant wapas
     let pointsBack = false;
     try {
-      await cancelPointsRedeem({ invoiceNumber: r.invoiceNumber });
+      await cancelPointsRedeem({ invoiceNumber: r.invoiceNumber, memberId, points: r.pointsRedeemed });
       pointsBack = true;
     } catch {
       pointsBack = false;
@@ -589,7 +636,7 @@ export async function handlePointsAction({ shop, customerGid, body }) {
   try {
     switch (action) {
       case "balance":
-        return await getBalance(customerGid);
+        return await getBalance(shop, customerGid);
       case "sendOtp":
         return await sendRedeemOtp({
           shop,
@@ -606,6 +653,7 @@ export async function handlePointsAction({ shop, customerGid, body }) {
           billAmount: body.billAmount,
           checkoutToken: body.checkoutToken,
           otp: body.otp,
+          cart: body.cart,
         });
       case "cancel":
         return await cancel({ customerGid, redemptionId: body.redemptionId });
