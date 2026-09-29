@@ -32,8 +32,11 @@ const OTP_REQUIRED = process.env.POINTS_OTP_REQUIRED !== "false"; // default: OT
 const OTP_RESEND_AFTER_MS = 30 * 1000; // resend 30 sec baad
 const OTP_SESSION_MS = 10 * 60 * 1000; // bheja hua OTP 10 min tak use ho sakta hai
 const OTP_MAX_VERIFY_ATTEMPTS = 3; // 3 galat -> naya OTP mangao
-const OTP_MAX_SENDS = 4; // 15 min mein zyada se zyada 4 OTP
-const OTP_SEND_WINDOW_MS = 15 * 60 * 1000;
+// Limits env se badal sakte ho (Render -> Environment), code nahi chhedna
+const OTP_MAX_SENDS = Number(process.env.OTP_MAX_SENDS || "5"); // itni der mein zyada se zyada itne OTP
+const OTP_SEND_WINDOW_MS = Number(process.env.OTP_SEND_WINDOW_MIN || "15") * 60 * 1000;
+// OTP sahi daalne ke baad itni der tak dobara OTP nahi maangenge (redeem kisi aur wajah se fail ho to)
+const OTP_VERIFIED_MS = 5 * 60 * 1000;
 
 // customerGid -> { phone, sentAt, attempts, sends: [timestamps] }
 // (memory mein; server restart pe reset - theek hai)
@@ -64,7 +67,7 @@ function apiErrorToFail(err) {
   if (err instanceof PointsApiError) {
     switch (err.code) {
       case "INSUFFICIENT_POINTS":
-        return fail(err.code, "You don't have enough points.");
+        return fail(err.code, devMsg("You don't have enough points.", err.message));
       case "BELOW_MINIMUM":
         return fail(err.code, `Minimum ${cfg.minRedeemPoints} points can be redeemed.`);
       case "API_ERROR":
@@ -395,6 +398,11 @@ async function sendRedeemOtp({ shop, customerGid, points, billAmount, checkoutTo
     return apiErrorToFail(err);
   }
 
+  // OTP abhi-abhi verify hua tha -> naya SMS mat bhejo, seedha redeem hone do
+  if (OTP_REQUIRED && hasFreshVerifiedOtp(customerGid)) {
+    return { ok: true, alreadyVerified: true };
+  }
+
   const now = Date.now();
   const st = otpState.get(customerGid) || { sends: [] };
   st.sends = (st.sends || []).filter((t) => now - t < OTP_SEND_WINDOW_MS);
@@ -443,9 +451,22 @@ async function sendRedeemOtp({ shop, customerGid, points, billAmount, checkoutTo
   };
 }
 
+// OTP abhi-abhi sahi daala gaya tha? (5 min tak dobara OTP nahi)
+function hasFreshVerifiedOtp(customerGid) {
+  const st = otpState.get(customerGid);
+  return !!(st?.verifiedAt && Date.now() - st.verifiedAt < OTP_VERIFIED_MS);
+}
+
+// Redeem safal hone pe verified OTP khatam (agle redeem ke liye naya OTP)
+function consumeVerifiedOtp(customerGid) {
+  const st = otpState.get(customerGid);
+  if (st) st.verifiedAt = null;
+}
+
 // Redeem se pehle OTP check. Sahi hai to null, warna fail(...)
 async function checkRedeemOtp(customerGid, otp) {
   if (!OTP_REQUIRED) return null;
+  if (hasFreshVerifiedOtp(customerGid)) return null;
   const st = otpState.get(customerGid);
   if (!st?.sentAt || !st.phone) {
     return fail("OTP_REQUIRED", "Please request an OTP first.");
@@ -468,9 +489,10 @@ async function checkRedeemOtp(customerGid, otp) {
     return fail("OTP_INVALID", `Incorrect OTP. ${left} attempt${left === 1 ? "" : "s"} left.`);
   }
 
-  // OTP ek hi baar kaam aata hai
+  // OTP ek hi baar kaam aata hai; 5 min tak "verified" maano (redeem fail ho to dobara OTP na lage)
   st.sentAt = null;
   st.attempts = 0;
+  st.verifiedAt = Date.now();
   return null;
 }
 
@@ -510,6 +532,7 @@ async function redeem({ shop, customerGid, points, billAmount, checkoutToken, ot
   try {
     r = await redeemPoints({ memberId, points: pts, requestId: row.id, billAmount: bill, cart });
   } catch (err) {
+    console.error("[points] redeem failed:", err?.code, err?.message);
     // Timeout: ho sakta hai points block ho gaye hon -> haath se check
     const unsure = err?.code === "TIMEOUT";
     await prisma.pointsRedemption.update({
@@ -564,6 +587,7 @@ async function redeem({ shop, customerGid, points, billAmount, checkoutToken, ot
   }
 
   const amountToPay = Math.max(0, round2(bill - r.amountRedeemed));
+  consumeVerifiedOtp(customerGid);
 
   await prisma.pointsRedemption.update({
     where: { id: row.id },

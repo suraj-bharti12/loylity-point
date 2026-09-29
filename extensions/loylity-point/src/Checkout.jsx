@@ -410,9 +410,15 @@ function Extension() {
   // ---------- OTP bhejo (pehli baar ya resend) ----------
   async function sendOtpFor(pts) {
     if (busyRef.current) return;
+    let skipOtp = false;
     setBusyBoth(true);
     try {
       const res = await callApi("sendOtp", { points: pts, billAmount: remaining, checkoutToken });
+      if (res.ok && res.alreadyVerified) {
+        // OTP abhi-abhi verify hua tha -> naya OTP nahi, seedha redeem
+        skipOtp = true;
+        return;
+      }
       if (!res.ok) {
         if (otpStage) {
           setOtpError(res.message || "Couldn't send OTP. Please try again.");
@@ -428,6 +434,7 @@ function Extension() {
     } finally {
       setBusyBoth(false);
     }
+    if (skipOtp) await doRedeem(pts, "");
   }
 
   async function onResendOtp() {

@@ -222,9 +222,9 @@ async function liveBlock({ phone, points, billAmount, cart }) {
 
   if (json.success !== true || !json.data?.referenceId) {
     const msg = json.message || "Points block failed";
-    const code = /insufficient|not enough|less than|exceed|balance/i.test(msg)
-      ? "INSUFFICIENT_POINTS"
-      : "API_REJECTED";
+    console.error("[points] Mojito block rejected:", msg, "| points:", points, "| totalNet:", totalNet);
+    // Sirf saaf "kam points" wale message ko hi INSUFFICIENT maano, baaki Mojito ka asli message dikhao
+    const code = /insufficient|not enough/i.test(msg) ? "INSUFFICIENT_POINTS" : "API_REJECTED";
     throw new PointsApiError(msg, code);
   }
 
@@ -255,6 +255,7 @@ async function liveUnblock({ phone, points, referenceId }) {
     referenceId: String(referenceId),
   });
   if (json.success !== true) {
+    console.error("[points] Mojito unblock rejected:", json.message, "| ref:", referenceId);
     throw new PointsApiError(json.message || "Points unblock failed", "API_REJECTED");
   }
   return {
