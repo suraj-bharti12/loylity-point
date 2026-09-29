@@ -7,9 +7,8 @@ import { useState, useEffect, useRef } from "preact/hooks";
 // to apne aap wahi server use hoga. Kuch set karne ki zarurat nahi.
 // Agar box mein "Server URL is not set" aaye, to terminal wala trycloudflare URL
 // MANUAL_API_BASE mein daal do (end mein / nahi).
-const MANUAL_API_BASE = "https://supposed-consultants-reasoning-adjustable.trycloudflare.com"; // <-- YAHAN apna abhi wala trycloudflare URL daalo
-// Live ke liye (baad mein): naye app ke asli server ka URL
-const PROD_API_BASE = "";
+const MANUAL_API_BASE = "";
+const PROD_API_BASE = "https://loylity-point.onrender.com";
 
 // Testing ke time error mein server URL dikhao (live se pehle false kar dena)
 const SHOW_DEBUG = true;

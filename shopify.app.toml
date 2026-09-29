@@ -2,7 +2,7 @@
 
 client_id = "2c2358bbab842c4f91cc875d4597c6e1"
 name = "loylity-point"
-application_url = "https://supposed-consultants-reasoning-adjustable.trycloudflare.com"
+application_url = "https://loylity-point.onrender.com"
 embedded = true
 
 [access_scopes]
@@ -46,10 +46,10 @@ api_version = "2026-10"
 
 [auth]
 redirect_urls = [
-  "https://supposed-consultants-reasoning-adjustable.trycloudflare.com/auth/callback",
-  "https://supposed-consultants-reasoning-adjustable.trycloudflare.com/auth/shopify/callback",
-  "https://supposed-consultants-reasoning-adjustable.trycloudflare.com/api/auth/callback"
+  "https://loylity-point.onrender.com/auth/callback",
+  "https://loylity-point.onrender.com/auth/shopify/callback",
+  "https://loylity-point.onrender.com/api/auth/callback"
 ]
 
 [build]
-automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false
