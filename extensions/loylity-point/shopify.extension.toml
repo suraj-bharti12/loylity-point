@@ -38,9 +38,22 @@ api_access = true
 # your extension. Learn more:
 # https://shopify.dev/docs/api/checkout-ui-extensions/latest#configuration
 
-# [extensions.settings]
-# [[extensions.settings.fields]]
-# key = "banner_title"
-# type = "single_line_text_field"
-# name = "Banner title"
-# description = "Enter a title for the banner"
+[extensions.settings]
+
+  [[extensions.settings.fields]]
+  key = "title"
+  type = "single_line_text_field"
+  name = "Box heading"
+  description = "Leave empty to show: Fabcoins"
+
+  [[extensions.settings.fields]]
+  key = "show_zero_points"
+  type = "boolean"
+  name = "Show to customers with 0 points"
+  description = "Off: hide the box for customers with 0 points or no loyalty account"
+
+  [[extensions.settings.fields]]
+  key = "hide_product_types"
+  type = "single_line_text_field"
+  name = "Hide box for these product types"
+  description = "Comma separated. Leave empty for: gift cards, custom kurta"

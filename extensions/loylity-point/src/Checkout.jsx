@@ -17,9 +17,24 @@ const SHOW_DEBUG = true;
 const PING_EVERY_MS = 20 * 1000;
 const REQUEST_TIMEOUT_MS = 30 * 1000;
 const STORAGE_KEY = "loyalty_points_redemption_v1";
-// Cart mein in product types ka koi item ho to Fabcoins box nahi dikhega
-// (chhote/bade letters se farak nahi padta; naya type jodna ho to bas yahan likh do)
-const HIDE_FOR_PRODUCT_TYPES = ["gift cards", "custom kurta"];
+// ============ Checkout editor ki settings (code chhede bina badlo) ============
+// Checkout editor -> Fabcoins box pe click -> right side settings.
+// Setting khali ho to ye default chalenge:
+const DEFAULT_TITLE = "Fabcoins";
+const DEFAULT_HIDE_PRODUCT_TYPES = "gift cards, custom kurta";
+
+function readSettings() {
+  const s = shopify.settings?.value || {};
+  const title = String(s.title || "").trim() || DEFAULT_TITLE;
+  // Off (ya set nahi) = 0 points wale customer ko box nahi dikhega
+  const showZeroPoints = s.show_zero_points === true;
+  const typesText = String(s.hide_product_types || "").trim() || DEFAULT_HIDE_PRODUCT_TYPES;
+  const hideProductTypes = typesText
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  return { title, showZeroPoints, hideProductTypes };
+}
 
 // Order notes ("Additional details") keys
 const ATTR_KEYS = {
@@ -244,8 +259,9 @@ function Extension() {
   }
 
   // ---------- Box chhupane wale rules (wallet jaise) ----------
+  const settings = readSettings();
   const hasBlockedProduct = lines.some((l) =>
-    HIDE_FOR_PRODUCT_TYPES.includes(
+    settings.hideProductTypes.includes(
       String(l?.merchandise?.product?.productType || "").trim().toLowerCase(),
     ),
   );
@@ -558,6 +574,15 @@ function Extension() {
 
   if (hidden) return null;
 
+  // 0 points wale customer (ya jiska loyalty account hi nahi) -> setting Off ho to box mat dikhao.
+  // Points lage hue hon to hamesha dikhao (Remove ka button chahiye).
+  if (!settings.showZeroPoints && !active) {
+    const stillLoading = loading && !balance && !loadError;
+    const zeroPoints = balance && Number(balance.points || 0) <= 0;
+    const noAccount = loadError?.code === "NOT_MEMBER";
+    if (stillLoading || zeroPoints || noAccount) return null;
+  }
+
   let content;
 
   if (active) {
@@ -661,7 +686,7 @@ function Extension() {
   return (
     <s-box border="base" borderRadius="base" padding="base">
       <s-stack gap="base">
-        <s-heading>Fabcoins</s-heading>
+        <s-heading>{settings.title}</s-heading>
         {content}
         {notice && <s-banner tone={notice.tone}>{notice.text}</s-banner>}
       </s-stack>
