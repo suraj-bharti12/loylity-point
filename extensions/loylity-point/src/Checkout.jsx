@@ -658,9 +658,9 @@ function Extension() {
   } else {
     content = (
       <s-stack key="form" gap="base">
-        <s-text>Total points: {formatNum(availablePoints)}</s-text>
+        <s-text>Total Fabcoins: {formatNum(availablePoints)}</s-text>
         <s-text>
-          You can redeem up to {formatNum(maxPoints)} points (≈ {formatINR(maxPoints * rate)}) on this order.
+          You can redeem up to {formatNum(maxPoints)} Fabcoins (≈ {formatINR(maxPoints * rate)}) on this order.
         </s-text>
         <s-number-field
           label="Points to redeem"
