@@ -622,7 +622,7 @@ function Extension() {
     content = (
       <s-stack key="otp" gap="base">
         <s-text>
-          Redeeming {formatNum(otpStage.points)} points (≈ {formatINR(otpStage.points * rate)})
+          Redeeming {formatNum(otpStage.points)} Fabcoins (≈ {formatINR(otpStage.points * rate)})
         </s-text>
         <s-text>Enter the OTP sent to {otpStage.maskedPhone}</s-text>
         {SHOW_DEBUG && otpStage.dummy && (
@@ -652,7 +652,7 @@ function Extension() {
         <s-link onClick={onResendOtp}>
           {resendIn > 0 ? `Resend OTP in ${resendIn}s` : "Resend OTP"}
         </s-link>
-        <s-link onClick={onChangePoints}>Change points</s-link>
+        <s-link onClick={onChangePoints}>Change Fabcoins</s-link>
       </s-stack>
     );
   } else {
