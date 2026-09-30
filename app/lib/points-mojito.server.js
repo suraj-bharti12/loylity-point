@@ -9,7 +9,7 @@
 //   ya MOJITO_API_USER=... + MOJITO_API_PASS=...
 //   MOJITO_POINTS_BASE_URL   (optional, default https://fabindia.mojitolabs.com)
 //   POINTS_RUPEE_PER_POINT   (optional, default 1  -> Mojito currencyRate 1.0)
-//   POINTS_MIN_REDEEM        (optional, default 100)
+//   POINTS_MIN_REDEEM        (optional, default 1 = koi minimum nahi)
 
 import crypto from "node:crypto";
 
@@ -17,7 +17,8 @@ const MODE = String(process.env.POINTS_API_MODE || "dummy").trim().toLowerCase()
 const IS_LIVE = MODE === "mojito";
 
 const RUPEE_PER_POINT = Number(process.env.POINTS_RUPEE_PER_POINT || "1");
-const MIN_REDEEM_POINTS = Number(process.env.POINTS_MIN_REDEEM || "100");
+// Default 1 = customer kitne bhi points (1 se upar) redeem kar sakta hai
+const MIN_REDEEM_POINTS = Math.max(1, Number(process.env.POINTS_MIN_REDEEM || "1"));
 
 const BASE_URL = String(process.env.MOJITO_POINTS_BASE_URL || "https://fabindia.mojitolabs.com")
   .trim()

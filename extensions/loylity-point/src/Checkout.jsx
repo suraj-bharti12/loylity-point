@@ -21,6 +21,7 @@ const STORAGE_KEY = "loyalty_points_redemption_v1";
 // Checkout editor -> Fabcoins box pe click -> right side settings.
 // Setting khali ho to ye default chalenge:
 const DEFAULT_TITLE = "Fabcoins";
+const DEFAULT_POINTS_LABEL = "Fabcoins"; // "200 Fabcoins applied"
 const DEFAULT_HIDE_PRODUCT_TYPES = "gift cards, custom kurta";
 
 function readSettings() {
@@ -33,7 +34,8 @@ function readSettings() {
     .split(",")
     .map((t) => t.trim().toLowerCase())
     .filter(Boolean);
-  return { title, showZeroPoints, hideProductTypes };
+  const pointsLabel = String(s.points_label || "").trim() || DEFAULT_POINTS_LABEL;
+  return { title, showZeroPoints, hideProductTypes, pointsLabel };
 }
 
 // Order notes ("Additional details") keys
@@ -595,7 +597,7 @@ function Extension() {
   if (active) {
     content = (
       <s-stack key="applied" gap="base">
-        <s-banner tone="success" heading={`${formatNum(active.pointsRedeemed)} points applied`}>
+        <s-banner tone="success" heading={`${formatNum(active.pointsRedeemed)} ${settings.pointsLabel} applied`}>
           <s-text>≈ {formatINR(active.amountRedeemed)} applied as a gift card on this order.</s-text>
         </s-banner>
         <s-button variant="secondary" inlineSize="fill" loading={busy} disabled={busy} onClick={() => removeRedemption()}>
