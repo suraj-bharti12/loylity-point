@@ -21,7 +21,9 @@ const STORAGE_KEY = "loyalty_points_redemption_v1";
 // Checkout editor -> Fabcoins box pe click -> right side settings.
 // Setting khali ho to ye default chalenge:
 const DEFAULT_TITLE = "Fabcoins";
-const DEFAULT_POINTS_LABEL = "Fabcoins"; // "200 Fabcoins applied"
+const DEFAULT_POINTS_LABEL = "Fabcoins"; // customer ko "points" ki jagah yahi shabd dikhega
+// Abhi ka naam (settings se); har render pe update hota hai, har message isi se banta hai
+let LABEL = DEFAULT_POINTS_LABEL;
 const DEFAULT_HIDE_PRODUCT_TYPES = "gift cards, custom kurta";
 
 function readSettings() {
@@ -35,6 +37,7 @@ function readSettings() {
     .map((t) => t.trim().toLowerCase())
     .filter(Boolean);
   const pointsLabel = String(s.points_label || "").trim() || DEFAULT_POINTS_LABEL;
+  LABEL = pointsLabel;
   return { title, showZeroPoints, hideProductTypes, pointsLabel };
 }
 
@@ -92,7 +95,7 @@ async function callApi(action, body = {}) {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({ action, token, ...body }),
+      body: JSON.stringify({ action, token, label: LABEL, ...body }),
       signal: controller.signal,
     });
     let data = null;
@@ -212,7 +215,11 @@ async function setOrderAttributes(r) {
 
 async function clearOrderAttributes() {
   if (!canUpdateAttributes()) return;
-  for (const key of [...Object.values(ATTR_KEYS), LOYALTY_GC_ATTR, ...LEGACY_ATTR_KEYS]) {
+  const present = new Set((shopify.attributes?.value || []).map((a) => a.key));
+  const keys = [...Object.values(ATTR_KEYS), LOYALTY_GC_ATTR, ...LEGACY_ATTR_KEYS].filter((k) =>
+    present.has(k),
+  );
+  for (const key of keys) {
     try {
       await shopify.applyAttributeChange({ type: "removeAttribute", key });
     } catch {
@@ -325,17 +332,21 @@ function Extension() {
     })();
   }, [checkoutToken]);
 
-  // 3) Customer ne payment section se gift card hata diya -> turant points wapas
+  // 3) Customer ne gift card ka chip (x) se hata diya -> turant points wapas
   useEffect(() => {
     const a = activeRef.current;
-    if (!a || busyRef.current) return;
+    if (!a) return;
     if (isGiftCardApplied(appliedGiftCards, a.giftCardCode)) {
+      // Busy ho tab bhi yaad rakho ki card laga hua dikh gaya
       seenAppliedRef.current = true;
       missRef.current = 0;
-    } else if (seenAppliedRef.current) {
+      return;
+    }
+    // Card gayab: busy khatam hote hi ye effect dobara chalega (busy dependency)
+    if (seenAppliedRef.current && !busyRef.current) {
       removeRedemption({ alreadyRemoved: true });
     }
-  }, [appliedGiftCards, active]);
+  }, [appliedGiftCards, active, busy]);
 
   // 4) Har 20 sec ping
   useEffect(() => {
@@ -345,15 +356,19 @@ function Extension() {
       if (!a || busyRef.current) return;
       if (!isGiftCardApplied(shopify.appliedGiftCards.value, a.giftCardCode)) {
         missRef.current += 1;
-        if (missRef.current >= 2) await removeRedemption({ alreadyRemoved: true });
+        // Pehle dikh chuka tha to turant, warna 2 baar (40 sec) gayab milne pe hatao
+        if (seenAppliedRef.current || missRef.current >= 2) {
+          await removeRedemption({ alreadyRemoved: true });
+        }
         return;
       }
+      seenAppliedRef.current = true;
       missRef.current = 0;
       const res = await callApi("ping", { redemptionId: a.redemptionId });
       if (res.ok && res.alive === false) {
         await removeRedemption({
           skipCancel: true,
-          message: "Your points session expired and the points were returned. You can apply them again.",
+          message: `Your ${LABEL} session expired and your ${LABEL} were returned. You can apply them again.`,
         });
       }
     };
@@ -365,7 +380,7 @@ function Extension() {
   // 5) Gift card / Custom kurta cart mein aa gaya -> points hatao
   useEffect(() => {
     if (hidden && activeRef.current && !busyRef.current) {
-      removeRedemption({ message: "Loyalty points were removed because they can't be used on this order." });
+      removeRedemption({ message: `${LABEL} were removed because they can't be used on this order.` });
     }
   }, [hidden, active]);
 
@@ -381,15 +396,15 @@ function Extension() {
     setFieldError("");
     const pts = Number(String(pointsInput || "").trim());
     if (!Number.isInteger(pts) || pts <= 0) {
-      setFieldError("Enter a valid number of points.");
+      setFieldError(`Enter a valid number of ${LABEL}.`);
       return null;
     }
     if (pts < minPoints) {
-      setFieldError(`Minimum ${formatNum(minPoints)} points can be redeemed.`);
+      setFieldError(`Minimum ${formatNum(minPoints)} ${LABEL} can be redeemed.`);
       return null;
     }
     if (pts > maxPoints) {
-      setFieldError(`You can redeem up to ${formatNum(maxPoints)} points on this order.`);
+      setFieldError(`You can redeem up to ${formatNum(maxPoints)} ${LABEL} on this order.`);
       return null;
     }
     return pts;
@@ -486,8 +501,8 @@ function Extension() {
           tone: "critical",
           text:
             res.code === "TIMEOUT"
-              ? "We couldn't confirm your points. If any points were deducted, they will be returned within 15 minutes."
-              : res.message || "Couldn't redeem points. Please try again.",
+              ? `We couldn't confirm your ${LABEL}. If any ${LABEL} were deducted, they will be returned within 15 minutes.`
+              : res.message || `Couldn't redeem ${LABEL}. Please try again.`,
         });
         await loadBalance();
         return;
@@ -523,13 +538,14 @@ function Extension() {
         setOtpStage(null);
         setNotice({
           tone: "critical",
-          text: "Couldn't apply your points to this order. Your points will be returned.",
+          text: `Couldn't apply your ${LABEL} to this order. Your ${LABEL} will be returned.`,
         });
         await loadBalance();
         return;
       }
 
-      seenAppliedRef.current = false;
+      // applyGiftCardChange safal = card laga hua hai
+      seenAppliedRef.current = true;
       missRef.current = 0;
       setActiveBoth(record);
       setPointsInput("");
@@ -551,7 +567,7 @@ function Extension() {
       if (!alreadyRemoved && isGiftCardApplied(shopify.appliedGiftCards.value, a.giftCardCode)) {
         const r = await shopify.applyGiftCardChange({ type: "removeGiftCard", code: a.giftCardCode });
         if (r?.type === "error") {
-          setNotice({ tone: "critical", text: "Couldn't remove your points. Please try again." });
+          setNotice({ tone: "critical", text: `Couldn't remove your ${LABEL}. Please try again.` });
           return;
         }
       }
@@ -560,16 +576,17 @@ function Extension() {
         const res = await callApi("cancel", { redemptionId: a.redemptionId });
         cancelOk = !!res.ok;
       }
-      await clearOrderAttributes();
+      // Pehle box turant normal karo, phir order notes saaf (isme 1-2 sec lagte hain)
       await clearSaved();
       seenAppliedRef.current = false;
       missRef.current = 0;
       setActiveBoth(null);
+      await clearOrderAttributes();
 
       if (message) {
         setNotice({ tone: "info", text: message });
       } else if (!cancelOk) {
-        setNotice({ tone: "warning", text: "Points removed. They will be back in your account within 15 minutes." });
+        setNotice({ tone: "warning", text: `${LABEL} removed. They will be back in your account within 15 minutes.` });
       } else {
         setNotice(null);
       }
@@ -597,7 +614,7 @@ function Extension() {
   if (active) {
     content = (
       <s-stack key="applied" gap="base">
-        <s-banner tone="success" heading={`${formatNum(active.pointsRedeemed)} ${settings.pointsLabel} applied`}>
+        <s-banner tone="success" heading={`${formatNum(active.pointsRedeemed)} ${LABEL} applied`}>
           <s-text>≈ {formatINR(active.amountRedeemed)} applied as a gift card on this order.</s-text>
         </s-banner>
         <s-button variant="secondary" inlineSize="fill" loading={busy} disabled={busy} onClick={() => removeRedemption()}>
@@ -606,13 +623,13 @@ function Extension() {
       </s-stack>
     );
   } else if (loading && !balance) {
-    content = <s-spinner accessibilityLabel="Loading points" />;
+    content = <s-spinner accessibilityLabel={`Loading ${LABEL}`} />;
   } else if (loadError?.code === "NOT_LOGGED_IN") {
-    content = <s-text color="subdued">Log in to use your loyalty points.</s-text>;
+    content = <s-text color="subdued">Log in to use your {LABEL}.</s-text>;
   } else if (loadError || !balance) {
     content = (
       <s-stack key="error" gap="base">
-        <s-banner tone="critical">{loadError?.message || "Couldn't load your points."}</s-banner>
+        <s-banner tone="critical">{loadError?.message || `Couldn't load your ${LABEL}.`}</s-banner>
         <s-button variant="secondary" inlineSize="fill" loading={loading} onClick={() => loadBalance()}>
           Try again
         </s-button>
@@ -622,7 +639,7 @@ function Extension() {
     content = (
       <s-stack key="otp" gap="base">
         <s-text>
-          Redeeming {formatNum(otpStage.points)} Fabcoins (≈ {formatINR(otpStage.points * rate)})
+          Redeeming {formatNum(otpStage.points)} {LABEL} (≈ {formatINR(otpStage.points * rate)})
         </s-text>
         <s-text>Enter the OTP sent to {otpStage.maskedPhone}</s-text>
         {SHOW_DEBUG && otpStage.dummy && (
@@ -652,18 +669,18 @@ function Extension() {
         <s-link onClick={onResendOtp}>
           {resendIn > 0 ? `Resend OTP in ${resendIn}s` : "Resend OTP"}
         </s-link>
-        <s-link onClick={onChangePoints}>Change Fabcoins</s-link>
+        <s-link onClick={onChangePoints}>Change {LABEL}</s-link>
       </s-stack>
     );
   } else {
     content = (
       <s-stack key="form" gap="base">
-        <s-text>Total Fabcoins: {formatNum(availablePoints)}</s-text>
+        <s-text>Total {LABEL}: {formatNum(availablePoints)}</s-text>
         <s-text>
-          You can redeem up to {formatNum(maxPoints)} Fabcoins (≈ {formatINR(maxPoints * rate)}) on this order.
+          You can redeem up to {formatNum(maxPoints)} {LABEL} (≈ {formatINR(maxPoints * rate)}) on this order.
         </s-text>
         <s-number-field
-          label="Points to redeem"
+          label={`${LABEL} to redeem`}
           value={pointsInput}
           min={minPoints}
           max={maxPoints}

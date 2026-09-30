@@ -7,6 +7,7 @@
 //   cancel  -> gift card band + points wapas
 //   ping    -> checkout zinda hai (har 20 sec)
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import prisma from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import {
@@ -24,7 +25,8 @@ import { sendOtp, verifyOtp, normalizeIndianPhone, maskPhone, isOtpDummy } from 
 // Gift card ke note mein sabse pehle ye likha jayega (wallet wale cards se alag pehchaan)
 const POINTS_SOURCE_LABEL = process.env.POINTS_SOURCE_LABEL || "XENO LOYALTY POINTS";
 
-const STALE_ACTIVE_MS = 10 * 60 * 1000; // 10 min ping nahi aaya
+// Itni der ping nahi aaya = customer checkout chhod gaya (Render env POINTS_PING_TIMEOUT_MIN se badlo)
+const STALE_ACTIVE_MS = Number(process.env.POINTS_PING_TIMEOUT_MIN || "10") * 60 * 1000;
 const STALE_PENDING_MS = 2 * 60 * 1000; // pending 2 min se zyada = kuch atka
 
 // ---------------- OTP settings ----------------
@@ -43,6 +45,21 @@ const OTP_VERIFIED_MS = 5 * 60 * 1000;
 const otpState = new Map();
 
 // ---------------- Helpers ----------------
+
+// Customer ko "points" ki jagah dikhne wala naam (checkout box ki setting se aata hai)
+const DEFAULT_POINTS_LABEL = String(process.env.POINTS_LABEL || "Fabcoins").trim() || "Fabcoins";
+const labelStore = new AsyncLocalStorage();
+function L() {
+  return labelStore.getStore() || DEFAULT_POINTS_LABEL;
+}
+function cleanLabel(raw) {
+  const t = String(raw || "").replace(/[<>]/g, "").trim().slice(0, 30);
+  return t || DEFAULT_POINTS_LABEL;
+}
+// Mojito ke message mein "points" ho to usko bhi naam se badlo
+function brand(msg) {
+  return String(msg || "").replace(/\bpoints\b/gi, L()).replace(/\bpoint\b/gi, L());
+}
 
 function fail(code, message) {
   return { ok: false, code, message };
@@ -67,9 +84,9 @@ function apiErrorToFail(err) {
   if (err instanceof PointsApiError) {
     switch (err.code) {
       case "INSUFFICIENT_POINTS":
-        return fail(err.code, devMsg("You don't have enough points.", err.message));
+        return fail(err.code, devMsg(`You don't have enough ${L()}.`, err.message));
       case "BELOW_MINIMUM":
-        return fail(err.code, `Minimum ${cfg.minRedeemPoints} points can be redeemed.`);
+        return fail(err.code, `Minimum ${cfg.minRedeemPoints} ${L()} can be redeemed.`);
       case "API_ERROR":
       case "CONFIG":
         return fail(err.code, devMsg("Loyalty service is not available right now. Please try again.", err.message));
@@ -78,12 +95,12 @@ function apiErrorToFail(err) {
       case "NOT_MEMBER":
         return fail(err.code, devMsg("No loyalty account found for your mobile number.", err.message));
       case "API_REJECTED":
-        return fail(err.code, err.message || "Couldn't process your points. Please try again.");
+        return fail(err.code, brand(err.message) || `Couldn't process your ${L()}. Please try again.`);
       default:
-        return fail(err.code || "API_ERROR", "Couldn't process your points. Please try again.");
+        return fail(err.code || "API_ERROR", `Couldn't process your ${L()}. Please try again.`);
     }
   }
-  return fail("API_ERROR", "Couldn't process your points. Please try again.");
+  return fail("API_ERROR", `Couldn't process your ${L()}. Please try again.`);
 }
 
 async function adminGraphql(shop, query, variables) {
@@ -214,7 +231,7 @@ async function resolveMemberId(shop, customerGid) {
   const memberId = phoneTo10(phone);
   if (!memberId) {
     return {
-      fail: fail("NO_PHONE", devMsg("Add a mobile number to your account to use loyalty points.", error)),
+      fail: fail("NO_PHONE", devMsg(`Add a mobile number to your account to use ${L()}.`, error)),
     };
   }
   return { memberId };
@@ -224,17 +241,17 @@ async function resolveMemberId(shop, customerGid) {
 function validateRedeemInput(pts, bill) {
   const cfg = getPointsConfig();
   if (!Number.isInteger(pts) || pts <= 0) {
-    return fail("INVALID_POINTS", "Enter a valid number of points.");
+    return fail("INVALID_POINTS", `Enter a valid number of ${L()}.`);
   }
   if (pts < cfg.minRedeemPoints) {
-    return fail("BELOW_MINIMUM", `Minimum ${cfg.minRedeemPoints} points can be redeemed.`);
+    return fail("BELOW_MINIMUM", `Minimum ${cfg.minRedeemPoints} ${L()} can be redeemed.`);
   }
   if (!(bill > 0)) {
     return fail("INVALID_BILL", "Order amount is not valid.");
   }
   const maxPoints = rupeesToMaxPoints(bill);
   if (pts > maxPoints) {
-    return fail("MORE_THAN_BILL", `You can redeem up to ${maxPoints} points on this order.`);
+    return fail("MORE_THAN_BILL", `You can redeem up to ${maxPoints} ${L()} on this order.`);
   }
   return null;
 }
@@ -278,16 +295,16 @@ export async function reverseRedemption(row, finalStatus = "reversed") {
         points: row.pointsRedeemed ?? row.pointsRequested,
       });
     } catch (err) {
-      // Gift card band ho gaya par points wapas nahi hue -> haath se check
+      // Gift card band ho gaya par Mojito unblock nahi hua -> status wahi rakho,
+      // sweeper har minute dobara try karega (10 baar fail -> check_needed)
       await prisma.pointsRedemption.update({
         where: { id: row.id },
         data: {
-          status: "check_needed",
           reverseAttempts: { increment: 1 },
           errorMessage: `Points cancel: ${String(err?.message || err)}`,
         },
       });
-      return { ok: false, status: "check_needed" };
+      return { ok: false, status: row.status };
     }
   }
 
@@ -318,7 +335,7 @@ async function settleOldRedemptions({ customerGid, checkoutToken }) {
         });
         continue;
       }
-      return fail("ALREADY_ACTIVE", "Your points are being processed. Please wait a moment.");
+      return fail("ALREADY_ACTIVE", `Your ${L()} are being processed. Please wait a moment.`);
     }
 
     // active: pehle dekho gift card order mein use to nahi ho gaya
@@ -344,7 +361,7 @@ async function settleOldRedemptions({ customerGid, checkoutToken }) {
     if (sameCheckout && pingAge <= STALE_ACTIVE_MS) {
       return fail(
         "ALREADY_ACTIVE",
-        "Points are already applied. Remove them first to change the amount.",
+        `${L()} are already applied. Remove them first to change the amount.`,
       );
     }
 
@@ -393,7 +410,7 @@ async function sendRedeemOtp({ shop, customerGid, points, billAmount, checkoutTo
   if (m.fail) return m.fail;
   try {
     const b = await fetchPointsBalance({ memberId: m.memberId });
-    if (pts > b.points) return fail("INSUFFICIENT_POINTS", "You don't have enough points.");
+    if (pts > b.points) return fail("INSUFFICIENT_POINTS", `You don't have enough ${L()}.`);
   } catch (err) {
     return apiErrorToFail(err);
   }
@@ -425,7 +442,7 @@ async function sendRedeemOtp({ shop, customerGid, points, billAmount, checkoutTo
     if (error) console.error("[otp] customer phone read failed:", error);
     return fail(
       "NO_PHONE",
-      devMsg("Add a mobile number to your account to redeem points.", error),
+      devMsg(`Add a mobile number to your account to redeem ${L()}.`, error),
     );
   }
 
@@ -574,7 +591,11 @@ async function redeem({ shop, customerGid, points, billAmount, checkoutToken, ot
     await prisma.pointsRedemption.update({
       where: { id: row.id },
       data: {
-        status: pointsBack ? "failed" : "check_needed",
+        // Unblock fail: "active" + purana ping -> sweeper agle minute se unblock dobara try karega
+        status: pointsBack ? "failed" : "active",
+        lastPingAt: pointsBack ? undefined : new Date(0),
+        pointsRedeemed: r.pointsRedeemed,
+        memberId,
         invoiceNumber: r.invoiceNumber,
         errorMessage: `Gift card create: ${String(err?.message || err)}`,
       },
@@ -582,7 +603,7 @@ async function redeem({ shop, customerGid, points, billAmount, checkoutToken, ot
     console.error("[points] gift card create failed:", err);
     return fail(
       "GIFT_CARD_FAILED",
-      devMsg("Couldn't apply your points right now. Please try again.", String(err?.message || err)),
+      devMsg(`Couldn't apply your ${L()} right now. Please try again.`, String(err?.message || err)),
     );
   }
 
@@ -636,7 +657,7 @@ async function cancel({ customerGid, redemptionId }) {
 
   const r = await reverseRedemption(row, "cancelled");
   if (!r.ok) {
-    return fail("CANCEL_FAILED", "Points will be returned to your account shortly.");
+    return fail("CANCEL_FAILED", `${L()} will be returned to your account shortly.`);
   }
   return { ok: true, status: r.status };
 }
@@ -658,8 +679,14 @@ async function ping({ customerGid, redemptionId }) {
 // ---------------- Route yahi function call karta hai ----------------
 
 export async function handlePointsAction({ shop, customerGid, body }) {
+  return labelStore.run(cleanLabel(body?.label), () =>
+    handlePointsActionInner({ shop, customerGid, body }),
+  );
+}
+
+async function handlePointsActionInner({ shop, customerGid, body }) {
   if (!customerGid) {
-    return fail("NOT_LOGGED_IN", "Log in to use your loyalty points.");
+    return fail("NOT_LOGGED_IN", `Log in to use your ${L()}.`);
   }
   const action = body?.action;
   try {
@@ -696,3 +723,81 @@ export async function handlePointsAction({ shop, customerGid, body }) {
     return fail("SERVER_ERROR", devMsg("Something went wrong. Please try again.", String(err?.message || err)));
   }
 }
+
+
+// ======================================================================
+// SWEEPER: har 1 minute
+//   - "active" redeem jinka 10 min se ping nahi aaya:
+//       gift card order mein use ho gaya -> "used" (Fabcoins wapas NAHI)
+//       use nahi hua -> gift card band + Mojito unblock -> "reversed"
+//   - fail ho to agle minute dobara; 10 baar fail -> "check_needed" (haath se dekho)
+//   - "pending" jo 2 min se atka -> "check_needed"
+// Band karna ho to Render env: POINTS_SWEEPER=off
+// ======================================================================
+const SWEEP_EVERY_MS = 60 * 1000;
+const MAX_REVERSE_ATTEMPTS = 10;
+let sweeping = false;
+
+export async function sweepStaleRedemptions() {
+  if (sweeping) return { skipped: true };
+  sweeping = true;
+  const summary = { checked: 0, reversed: 0, used: 0, retryLater: 0, checkNeeded: 0 };
+  try {
+    const cutoff = new Date(Date.now() - STALE_ACTIVE_MS);
+    const rows = await prisma.pointsRedemption.findMany({
+      where: { status: "active", lastPingAt: { lt: cutoff } },
+      orderBy: { lastPingAt: "asc" },
+      take: 50,
+    });
+
+    for (const row of rows) {
+      summary.checked += 1;
+      if ((row.reverseAttempts || 0) >= MAX_REVERSE_ATTEMPTS) {
+        await prisma.pointsRedemption.update({
+          where: { id: row.id },
+          data: {
+            status: "check_needed",
+            errorMessage: `Sweeper: ${MAX_REVERSE_ATTEMPTS} baar reverse fail. Last: ${row.errorMessage || "-"}`,
+          },
+        });
+        summary.checkNeeded += 1;
+        continue;
+      }
+      const r = await reverseRedemption(row, "reversed");
+      if (r.status === "used") summary.used += 1;
+      else if (r.ok) summary.reversed += 1;
+      else if (r.status === "check_needed") summary.checkNeeded += 1;
+      else summary.retryLater += 1;
+    }
+
+    const pendingCutoff = new Date(Date.now() - STALE_PENDING_MS);
+    const stuck = await prisma.pointsRedemption.updateMany({
+      where: { status: "pending", createdAt: { lt: pendingCutoff } },
+      data: { status: "check_needed", errorMessage: "Sweeper: pending bahut der se atka" },
+    });
+    summary.checkNeeded += stuck.count || 0;
+
+    if (summary.checked || stuck.count) {
+      console.log("[points-sweeper]", JSON.stringify(summary));
+    }
+  } catch (err) {
+    console.error("[points-sweeper] error:", err);
+  } finally {
+    sweeping = false;
+  }
+  return summary;
+}
+
+export function startPointsSweeper() {
+  if (process.env.POINTS_SWEEPER === "off") return;
+  if (globalThis.__pointsSweeperTimer) return; // ek hi baar chale
+  globalThis.__pointsSweeperTimer = setInterval(sweepStaleRedemptions, SWEEP_EVERY_MS);
+  globalThis.__pointsSweeperTimer.unref?.();
+  // Server start ke 15 sec baad ek baar turant (restart ke dauraan jo chhoot gaye)
+  setTimeout(sweepStaleRedemptions, 15 * 1000).unref?.();
+  console.log(
+    `[points-sweeper] started: har 1 min, ${STALE_ACTIVE_MS / 60000} min bina ping wale redeem wapas`,
+  );
+}
+
+startPointsSweeper();
