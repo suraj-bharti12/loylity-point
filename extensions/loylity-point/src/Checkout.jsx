@@ -289,7 +289,14 @@ function Extension() {
   const rate = Number(balance?.rupeePerPoint || 0);
   const minPoints = Number(balance?.minRedeemPoints || 0);
   const availablePoints = Number(balance?.points || 0);
-  const maxByBill = rate > 0 ? Math.floor((remaining + 1e-9) / rate) : 0;
+  // Mojito sirf products ki value tak Fabcoins leta hai (shipping pe nahi).
+  // Isliye limit = bacha hua bill aur products ki value, dono mein jo kam ho.
+  const itemsNet = lines.reduce((sum, l) => sum + Number(l?.cost?.totalAmount?.amount || 0), 0);
+  const redeemableAmount = Math.max(
+    0,
+    Math.round(Math.min(remaining, itemsNet > 0 ? itemsNet : remaining) * 100) / 100,
+  );
+  const maxByBill = rate > 0 ? Math.floor((redeemableAmount + 1e-9) / rate) : 0;
   const maxPoints = Math.max(0, Math.min(availablePoints, maxByBill));
 
   async function loadBalance() {
@@ -430,7 +437,7 @@ function Extension() {
     let skipOtp = false;
     setBusyBoth(true);
     try {
-      const res = await callApi("sendOtp", { points: pts, billAmount: remaining, checkoutToken });
+      const res = await callApi("sendOtp", { points: pts, billAmount: redeemableAmount, checkoutToken });
       if (res.ok && res.alreadyVerified) {
         // OTP abhi-abhi verify hua tha -> naya OTP nahi, seedha redeem
         skipOtp = true;
@@ -484,7 +491,7 @@ function Extension() {
     try {
       const res = await callApi("redeem", {
         points: pts,
-        billAmount: remaining,
+        billAmount: redeemableAmount,
         checkoutToken,
         otp,
         cart: buildCart(),
