@@ -158,6 +158,16 @@ function formatNum(n) {
   }
 }
 
+// Wallet button jaisa: ₹1,599.00
+function formatRupee(n) {
+  const v = Number(n || 0);
+  try {
+    return shopify.i18n.formatCurrency(v, { currency: "INR" });
+  } catch {
+    return `₹${v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+}
+
 function formatINR(n) {
   return `${Number(n || 0).toFixed(2)} INR`;
 }
@@ -310,6 +320,13 @@ function Extension() {
   );
   const maxByBill = rate > 0 ? Math.floor((redeemableAmount + 1e-9) / rate) : 0;
   const maxPoints = Math.max(0, Math.min(availablePoints, maxByBill));
+  // Button pe dikhne wala amount: field mein sahi number ho to wo, warna maximum
+  const typedPoints = Number(String(pointsInput || "").trim());
+  const buttonPoints =
+    String(pointsInput || "").trim() !== "" && Number.isInteger(typedPoints) && typedPoints > 0
+      ? typedPoints
+      : maxPoints;
+  const buttonAmount = formatRupee(buttonPoints * rate);
 
   async function loadBalance() {
     setLoading(true);
@@ -413,7 +430,9 @@ function Extension() {
   // ---------- Points field check ----------
   function readPointsOrError() {
     setFieldError("");
-    const pts = Number(String(pointsInput || "").trim());
+    const raw = String(pointsInput || "").trim();
+    // Field khali chhoda = jitne lag sakte hain utne (wallet button jaisa)
+    const pts = raw === "" ? maxPoints : Number(raw);
     if (!Number.isInteger(pts) || pts <= 0) {
       setFieldError(`Enter a valid number of ${LABEL}.`);
       return null;
@@ -636,9 +655,11 @@ function Extension() {
         <s-banner tone="success" heading={`${formatNum(active.pointsRedeemed)} ${LABEL} applied`}>
           <s-text>≈ {formatINR(active.amountRedeemed)} applied as a gift card on this order.</s-text>
         </s-banner>
-        <s-button variant="secondary" inlineSize="fill" loading={busy} disabled={busy} onClick={() => removeRedemption()}>
-          Remove
-        </s-button>
+        <s-stack direction="inline">
+          <s-button variant="secondary" loading={busy} disabled={busy} onClick={() => removeRedemption()}>
+            Remove
+          </s-button>
+        </s-stack>
       </s-stack>
     );
   } else if (loading && !balance) {
@@ -676,15 +697,16 @@ function Extension() {
             setOtpError("");
           }}
         />
-        <s-button
-          variant="secondary"
-          inlineSize="fill"
-          loading={busy}
-          disabled={busy || otpInput.length < 4}
-          onClick={onVerifyAndApply}
-        >
-          Verify & Apply
-        </s-button>
+        <s-stack direction="inline">
+          <s-button
+            variant="primary"
+            loading={busy}
+            disabled={busy || otpInput.length < 4}
+            onClick={onVerifyAndApply}
+          >
+            {`Verify & Apply ${formatRupee(otpStage.points * rate)}`}
+          </s-button>
+        </s-stack>
         <s-link onClick={onResendOtp}>
           {resendIn > 0 ? `Resend OTP in ${resendIn}s` : "Resend OTP"}
         </s-link>
@@ -699,7 +721,7 @@ function Extension() {
           You can redeem up to {formatNum(maxPoints)} {LABEL} (≈ {formatINR(maxPoints * rate)}) on this order.
         </s-text>
         <s-number-field
-          label={`${LABEL} to redeem`}
+          label={`${LABEL} to use (max ${formatNum(maxPoints)})`}
           value={pointsInput}
           min={minPoints}
           max={maxPoints}
@@ -711,19 +733,20 @@ function Extension() {
             setFieldError("");
           }}
         />
-        <s-button
-          variant="secondary"
-          inlineSize="fill"
-          loading={busy}
-          disabled={busy || !pointsInput || (balance?.otpRequired && resendIn > 0)}
-          onClick={onApply}
-        >
-          {balance?.otpRequired
-            ? resendIn > 0
-              ? `Send OTP (${resendIn}s)`
-              : "Send OTP"
-            : "Apply"}
-        </s-button>
+        <s-stack direction="inline">
+          <s-button
+            variant="primary"
+            loading={busy}
+            disabled={busy || maxPoints < minPoints || (balance?.otpRequired && resendIn > 0)}
+            onClick={onApply}
+          >
+            {balance?.otpRequired
+              ? resendIn > 0
+                ? `Send OTP (${resendIn}s)`
+                : `Send OTP ${buttonAmount}`
+              : `Apply ${buttonAmount}`}
+          </s-button>
+        </s-stack>
       </s-stack>
     );
   }
