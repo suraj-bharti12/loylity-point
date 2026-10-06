@@ -53,6 +53,11 @@ const ATTR_KEYS = {
 // Payment breakup extension isi se points ko LOYALTYPOINTS aur wallet ko GIFTCARDWALLET mein alag karta hai.
 const LOYALTY_GC_ATTR = "_loyalty_giftcard_last4";
 
+// Fabcoins lagte hi ye cart attribute set hota hai, hatate hi hat jaata hai.
+// Checkout Blocks app mein rule: cart attribute "fabcoins_applied" = "true" -> COD hide.
+const FABCOINS_FLAG_ATTR = "fabcoins_applied";
+const FABCOINS_FLAG_VALUE = "true";
+
 // Purane test wali keys (Remove pe ye bhi saaf ho jayengi)
 const LEGACY_ATTR_KEYS = [
   "PointsRedeemed",
@@ -196,6 +201,8 @@ function canUpdateAttributes() {
 async function setOrderAttributes(r) {
   if (!canUpdateAttributes()) return;
   const pairs = [
+    // Sabse pehle: COD hide wala flag (Checkout Blocks rule isi ko dekhta hai)
+    [FABCOINS_FLAG_ATTR, FABCOINS_FLAG_VALUE],
     [ATTR_KEYS.referenceId, r.referenceId],
     [ATTR_KEYS.points, r.pointsRedeemed],
     [ATTR_KEYS.billNo, r.billNo],
@@ -216,7 +223,12 @@ async function setOrderAttributes(r) {
 async function clearOrderAttributes() {
   if (!canUpdateAttributes()) return;
   const present = new Set((shopify.attributes?.value || []).map((a) => a.key));
-  const keys = [...Object.values(ATTR_KEYS), LOYALTY_GC_ATTR, ...LEGACY_ATTR_KEYS].filter((k) =>
+  const keys = [
+    FABCOINS_FLAG_ATTR,
+    ...Object.values(ATTR_KEYS),
+    LOYALTY_GC_ATTR,
+    ...LEGACY_ATTR_KEYS,
+  ].filter((k) =>
     present.has(k),
   );
   for (const key of keys) {
