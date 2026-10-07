@@ -177,16 +177,19 @@ function toCartItems(cart) {
   });
 }
 
-// Mojito ke totalNetAmount / totalGrossAmount (block request aur order notes dono mein yahi)
+// Mojito ke totalNetAmount / totalGrossAmount (block request aur order notes dono mein yahi).
+// Mojito Fabcoins ki limit totalNetAmount se banata hai, isliye shipping bhi isme jodte hain
+// (taaki Fabcoins se shipping bhi pay ho sake, wallet jaisa).
 export function computeTotals(cart, billAmount) {
   const cartItems = toCartItems(cart);
+  const shipping = round2(Math.max(0, Number(cart?.shipping) || 0));
   const totalNetAmount = cartItems.length
-    ? round2(cartItems.reduce((s, c) => s + c.productNetAmount, 0))
+    ? round2(cartItems.reduce((s, c) => s + c.productNetAmount, 0) + shipping)
     : round2(billAmount);
   const totalGrossAmount = cartItems.length
-    ? round2(cartItems.reduce((s, c) => s + c.productGrossAmount, 0))
+    ? round2(cartItems.reduce((s, c) => s + c.productGrossAmount, 0) + shipping)
     : totalNetAmount;
-  return { cartItems, totalNetAmount, totalGrossAmount };
+  return { cartItems, totalNetAmount, totalGrossAmount, shipping };
 }
 
 // Har block ke liye alag bill number (15 digit)

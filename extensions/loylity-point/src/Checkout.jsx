@@ -184,6 +184,7 @@ function isGiftCardApplied(appliedGiftCards, code) {
 function buildCart() {
   const lines = shopify.lines.value || [];
   return {
+    shipping: Number(shopify.cost.totalShippingAmount?.value?.amount || 0),
     items: lines.map((l) => {
       const net = Number(l?.cost?.totalAmount?.amount || 0);
       const discount = (l?.discountAllocations || []).reduce(
@@ -311,12 +312,14 @@ function Extension() {
   const rate = Number(balance?.rupeePerPoint || 0);
   const minPoints = Number(balance?.minRedeemPoints || 0);
   const availablePoints = Number(balance?.points || 0);
-  // Mojito sirf products ki value tak Fabcoins leta hai (shipping pe nahi).
-  // Isliye limit = bacha hua bill aur products ki value, dono mein jo kam ho.
+  // Limit = bacha hua bill aur (products + shipping), dono mein jo kam ho.
+  // Mojito ko bhi totalNetAmount mein shipping jaati hai, isliye Fabcoins se shipping bhi pay hoti hai.
   const itemsNet = lines.reduce((sum, l) => sum + Number(l?.cost?.totalAmount?.amount || 0), 0);
+  const shippingAmount = Number(shopify.cost.totalShippingAmount?.value?.amount || 0);
+  const cartValue = itemsNet + shippingAmount;
   const redeemableAmount = Math.max(
     0,
-    Math.round(Math.min(remaining, itemsNet > 0 ? itemsNet : remaining) * 100) / 100,
+    Math.round(Math.min(remaining, cartValue > 0 ? cartValue : remaining) * 100) / 100,
   );
   const maxByBill = rate > 0 ? Math.floor((redeemableAmount + 1e-9) / rate) : 0;
   const maxPoints = Math.max(0, Math.min(availablePoints, maxByBill));
