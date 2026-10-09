@@ -648,6 +648,74 @@ async function redeem({ shop, customerGid, points, billAmount, checkoutToken, ot
   };
 }
 
+// Security: checkout pe lage gift cards mein koi DOOSRE customer ka Fabcoins card to nahi?
+// (Fabcoins gift card ek normal code hai; koi apna code kisi aur ko de de to wo uske Fabcoins kharch kar sakta hai.)
+// Sirf "active" Fabcoins cards dekhte hain: used ka balance 0 hai, aur reversed/cancelled band ho chuke hain.
+// Guest (login nahi) ke checkout pe laga har Fabcoins card "doosre ka" hai.
+async function checkForeign({ customerGid, appliedLast4 }) {
+  const list = (Array.isArray(appliedLast4) ? appliedLast4 : [])
+    .map((x) => String(x || "").trim())
+    .filter((x) => /^[A-Za-z0-9]{4}$/.test(x))
+    .slice(0, 20);
+  if (!list.length) return { ok: true, removeLast4: [] };
+
+  const wanted = new Set(list.map((x) => x.toLowerCase()));
+  const rows = await prisma.pointsRedemption.findMany({ where: { status: "active" } });
+  const foreign = new Set();
+  for (const r of rows) {
+    const l4 = String(r.giftCardLast4 || "").toLowerCase();
+    if (!l4 || !wanted.has(l4)) continue;
+    if (customerGid && r.customerId === customerGid) continue; // apna card hai
+    foreign.add(l4);
+  }
+  const removeLast4 = list.filter((x) => foreign.has(x.toLowerCase()));
+  if (removeLast4.length) {
+    console.warn("[points] doosre customer ka Fabcoins card checkout pe:", customerGid || "guest", removeLast4);
+  }
+  return { ok: true, removeLast4 };
+}
+
+// Is customer ke abhi lage hue Fabcoins (checkout naya ho to box inhe gift card ke last 4 se pehchanta hai).
+// Poora gift card code kabhi nahi bhejte (DB mein hai hi nahi); hatane ke liye last 4 kaafi hain.
+async function myActive({ customerGid }) {
+  const rows = await prisma.pointsRedemption.findMany({
+    where: { customerId: customerGid, status: "active" },
+    orderBy: { createdAt: "desc" },
+  });
+  return {
+    ok: true,
+    redemptions: rows
+      .filter((r) => r.giftCardLast4)
+      .map((r) => ({
+        redemptionId: r.id,
+        giftCardLast4: r.giftCardLast4,
+        pointsRedeemed: r.pointsRedeemed,
+        amountRedeemed: r.amountRedeemed,
+        referenceId: r.invoiceNumber,
+        billNo: r.approvalCode,
+        billAmount: r.billAmount,
+        amountToPay: r.amountToPay,
+      })),
+  };
+}
+
+// Customer ke saare lage hue Fabcoins wapas (jaise EMP coupon lagne pe).
+// Gift card order mein use ho chuka ho to "used" (wapas NAHI); baaki: gift card band + Mojito unblock.
+async function releaseAll({ customerGid }) {
+  const rows = await prisma.pointsRedemption.findMany({
+    where: { customerId: customerGid, status: "active" },
+  });
+  const summary = { ok: true, released: 0, used: 0, retryLater: 0 };
+  for (const row of rows) {
+    const r = await reverseRedemption(row, "cancelled");
+    if (r.status === "used") summary.used += 1;
+    else if (r.ok) summary.released += 1;
+    else summary.retryLater += 1; // sweeper dobara try karega
+  }
+  if (rows.length) console.log("[points] releaseAll", customerGid, JSON.stringify(summary));
+  return summary;
+}
+
 async function cancel({ customerGid, redemptionId }) {
   const row = await prisma.pointsRedemption.findFirst({
     where: { id: String(redemptionId || ""), customerId: customerGid },
@@ -685,10 +753,19 @@ export async function handlePointsAction({ shop, customerGid, body }) {
 }
 
 async function handlePointsActionInner({ shop, customerGid, body }) {
+  const action = body?.action;
+  // Security check guest checkout pe bhi chalta hai (login ki zarurat nahi)
+  if (action === "checkForeign") {
+    try {
+      return await checkForeign({ customerGid, appliedLast4: body.appliedLast4 });
+    } catch (err) {
+      console.error("[points] checkForeign", err);
+      return fail("SERVER_ERROR", "Something went wrong.");
+    }
+  }
   if (!customerGid) {
     return fail("NOT_LOGGED_IN", `Log in to use your ${L()}.`);
   }
-  const action = body?.action;
   try {
     switch (action) {
       case "balance":
@@ -711,6 +788,10 @@ async function handlePointsActionInner({ shop, customerGid, body }) {
           otp: body.otp,
           cart: body.cart,
         });
+      case "myActive":
+        return await myActive({ customerGid });
+      case "releaseAll":
+        return await releaseAll({ customerGid });
       case "cancel":
         return await cancel({ customerGid, redemptionId: body.redemptionId });
       case "ping":

@@ -25,6 +25,8 @@ const DEFAULT_POINTS_LABEL = "Fabcoins"; // customer ko "points" ki jagah yahi s
 // Abhi ka naam (settings se); har render pe update hota hai, har message isi se banta hai
 let LABEL = DEFAULT_POINTS_LABEL;
 const DEFAULT_HIDE_PRODUCT_TYPES = "gift cards, custom kurta";
+// In shabdon se shuru hone wala coupon code laga ho to box nahi dikhega (jaise EMP10, EMP-STAFF)
+const DEFAULT_HIDE_COUPON_PREFIXES = "EMP";
 
 function readSettings() {
   const s = shopify.settings?.value || {};
@@ -38,7 +40,12 @@ function readSettings() {
     .filter(Boolean);
   const pointsLabel = String(s.points_label || "").trim() || DEFAULT_POINTS_LABEL;
   LABEL = pointsLabel;
-  return { title, showZeroPoints, hideProductTypes, pointsLabel };
+  const prefixText = String(s.hide_coupon_prefixes || "").trim() || DEFAULT_HIDE_COUPON_PREFIXES;
+  const hideCouponPrefixes = prefixText
+    .split(",")
+    .map((t) => t.trim().toUpperCase())
+    .filter(Boolean);
+  return { title, showZeroPoints, hideProductTypes, pointsLabel, hideCouponPrefixes };
 }
 
 // Order notes ("Additional details") keys
@@ -280,6 +287,8 @@ function Extension() {
   const missRef = useRef(0);
   const loadedRef = useRef(false);
   const restoredRef = useRef(false);
+  const foreignCheckedRef = useRef(""); // kaunse gift cards ka set already check ho chuka
+  const [restoreDone, setRestoreDone] = useState(false);
 
   function setBusyBoth(v) {
     busyRef.current = v;
@@ -299,7 +308,20 @@ function Extension() {
   );
   const canAddGiftCard = instructions?.giftCards?.canAddGiftCard !== false;
   const isINR = (totalMoney?.currencyCode || "INR") === "INR";
-  const hidden = hasBlockedProduct || !canAddGiftCard || !isINR;
+  // EMP... jaisa coupon code laga ho to box nahi dikhega (chhote/bade letters se farak nahi)
+  // Teeno jagah dekho: checkout ke codes, order discount, aur har product line ka discount
+  // (cart drawer wala employee discount aksar product line pe lagta hai)
+  const appliedCodes = [
+    ...(shopify.discountCodes?.value || []).map((d) => d?.code),
+    ...(shopify.discountAllocations?.value || []).map((d) => d?.code),
+    ...lines.flatMap((l) => (l?.discountAllocations || []).map((d) => d?.code)),
+  ]
+    .filter(Boolean)
+    .map((c) => String(c).trim().toUpperCase());
+  const hasBlockedCoupon = appliedCodes.some((code) =>
+    settings.hideCouponPrefixes.some((prefix) => code.startsWith(prefix)),
+  );
+  const hidden = hasBlockedProduct || hasBlockedCoupon || !canAddGiftCard || !isINR;
 
   // ---------- Bill mein kitna bacha (wallet gift card laga ho to wo minus) ----------
   const total = Number(totalMoney?.amount || 0);
@@ -352,24 +374,82 @@ function Extension() {
     }
   }, [hidden]);
 
-  // 2) Page reload ke baad laga hua redeem wapas dikhao
+  // 2) Checkout khulte hi pichle lage hue Fabcoins pehchano.
+  //    Box ka storage naye checkout pe saaf ho jaata hai (jaise home page se wapas aane pe),
+  //    par gift card aur notes cart pe lage rehte hain -> isliye server se poochte hain.
   useEffect(() => {
-    if (restoredRef.current || !checkoutToken) return;
+    if (restoredRef.current) return;
     restoredRef.current = true;
     (async () => {
-      const saved = await readSaved();
-      if (!saved?.redemptionId) return;
-      if (saved.checkoutToken !== checkoutToken) {
-        await clearSaved(); // purane checkout ka data
-        return;
-      }
-      if (!activeRef.current) {
-        seenAppliedRef.current = false;
-        missRef.current = 0;
-        setActiveBoth(saved);
+      try {
+        const applied = shopify.appliedGiftCards.value || [];
+        const attrs = shopify.attributes?.value || [];
+        const traceLast4 = String(attrs.find((a) => a.key === LOYALTY_GC_ATTR)?.value || "").trim();
+        const hasTrace = attrs.some((a) => a.key === FABCOINS_FLAG_ATTR || a.key === LOYALTY_GC_ATTR);
+
+        // (a) Box ka storage (page reload pe kaam aata hai). Isse kabhi seedha bharosa nahi karte:
+        //     A logout karke B login kare (same tab), to storage mein A ka redeem ho sakta hai.
+        const saved = await readSaved();
+        if (!applied.length && !hasTrace && !saved?.redemptionId) return;
+
+        // (b) Server se poochho: IS logged-in customer ke kaunse Fabcoins abhi lage hain
+        const res = await callApi("myActive");
+        let list;
+        if (res.ok) list = res.redemptions || [];
+        else if (res.code === "NOT_LOGGED_IN") list = []; // guest: koi Fabcoins uske nahi
+        else return; // server se jawab nahi -> kuch mat chhedo (sweeper sambhalega)
+
+        // (c) Apna redeem dhoondho: storage wala (agar server ne maana ki ye isi customer ka hai),
+        //     warna jo gift card is checkout pe laga hai
+        let mine = null;
+        let fullCode = "";
+        if (saved?.redemptionId) {
+          const s = list.find((r) => r.redemptionId === saved.redemptionId);
+          if (s && (saved.checkoutToken === checkoutToken || isGiftCardApplied(applied, s.giftCardLast4))) {
+            mine = s;
+            fullCode = saved.giftCardCode || "";
+          }
+        }
+        if (!mine) mine = list.find((r) => isGiftCardApplied(applied, r.giftCardLast4)) || null;
+        if (saved && (!mine || mine.redemptionId !== saved.redemptionId)) await clearSaved();
+
+        if (mine) {
+          // Yahi customer ke Fabcoins is checkout pe lage hain -> "applied" dikhao.
+          // Box chhupa ho (EMP coupon waghera) to effect 5 inhe turant hata dega.
+          if (!activeRef.current) {
+            const rec = {
+              redemptionId: mine.redemptionId,
+              giftCardCode: fullCode || mine.giftCardLast4, // hatane ke liye last 4 bhi kaafi hain
+              pointsRedeemed: mine.pointsRedeemed,
+              amountRedeemed: mine.amountRedeemed,
+              referenceId: mine.referenceId,
+              billNo: mine.billNo,
+              billAmount: mine.billAmount,
+              amountToPay: mine.amountToPay,
+              checkoutToken,
+            };
+            await writeSaved(rec);
+            seenAppliedRef.current = isGiftCardApplied(applied, rec.giftCardCode);
+            missRef.current = 0;
+            setActiveBoth(rec);
+          }
+          return;
+        }
+
+        // (d) Cart pe Fabcoins ke nishaan hain par wo IS customer ke zinda Fabcoins nahi
+        //     (doosre account ke - jaise A logout, B login same tab - ya pehle hi wapas ho chuke)
+        //     -> wo gift card aur notes hatao. Us account ke Fabcoins sweeper 10 min mein wapas karta hai.
+        if (hasTrace) {
+          if (traceLast4 && isGiftCardApplied(applied, traceLast4)) {
+            await shopify.applyGiftCardChange({ type: "removeGiftCard", code: traceLast4 });
+          }
+          await clearOrderAttributes();
+        }
+      } finally {
+        setRestoreDone(true);
       }
     })();
-  }, [checkoutToken]);
+  }, []);
 
   // 3) Customer ne gift card ka chip (x) se hata diya -> turant points wapas
   useEffect(() => {
@@ -416,12 +496,51 @@ function Extension() {
     return () => clearInterval(id);
   }, [active?.redemptionId]);
 
-  // 5) Gift card / Custom kurta cart mein aa gaya -> points hatao
+  // 5) Gift card / Custom kurta cart mein aa gaya, ya EMP coupon laga -> Fabcoins hatao
   useEffect(() => {
     if (hidden && activeRef.current && !busyRef.current) {
       removeRedemption({ message: `${LABEL} were removed because they can't be used on this order.` });
     }
-  }, [hidden, active]);
+  }, [hidden, active, busy]);
+
+  // 7) Security: checkout pe kisi DOOSRE customer ka Fabcoins gift card laga ho -> hatao.
+  //    Apne Fabcoins ke apply/remove se bilkul alag check hai, isliye unhe nahi chhedta.
+  //    Box chhupa ho (EMP coupon / guest) tab bhi chalta hai.
+  useEffect(() => {
+    if (!restoreDone) return;
+    const ours = activeRef.current?.giftCardCode
+      ? String(activeRef.current.giftCardCode).slice(-4).toLowerCase()
+      : "";
+    const toCheck = appliedGiftCards
+      .map((g) => String(g?.lastCharacters || "").trim())
+      .filter((l4) => l4 && l4.toLowerCase() !== ours);
+    if (!toCheck.length) return;
+    const key = toCheck.map((x) => x.toLowerCase()).sort().join(",");
+    if (foreignCheckedRef.current === key) return; // yahi cards pehle check ho chuke
+    foreignCheckedRef.current = key;
+    (async () => {
+      const r = await callApi("checkForeign", { appliedLast4: toCheck });
+      if (!r.ok) {
+        foreignCheckedRef.current = ""; // fail -> agli baar dobara check
+        return;
+      }
+      const bad = new Set((r.removeLast4 || []).map((x) => String(x).toLowerCase()));
+      if (!bad.size) return;
+      for (const g of shopify.appliedGiftCards.value || []) {
+        const l4 = String(g?.lastCharacters || "");
+        if (!bad.has(l4.toLowerCase())) continue;
+        try {
+          await shopify.applyGiftCardChange({ type: "removeGiftCard", code: l4 });
+        } catch {
+          // ignore
+        }
+      }
+      setNotice({
+        tone: "warning",
+        text: `${LABEL} from another account can't be used on this order, so that gift card was removed.`,
+      });
+    })();
+  }, [restoreDone, appliedGiftCards, active]);
 
   // ---------- OTP resend ka countdown ----------
   useEffect(() => {
@@ -593,6 +712,8 @@ function Extension() {
       setOtpStage(null);
       setOtpInput("");
       setOtpError("");
+      // OTP kaam aa gaya -> server ne bhi purana OTP khatam kar diya; Remove ke baad turant naya OTP mil sake
+      setResendIn(0);
       await setOrderAttributes(record);
     } finally {
       setBusyBoth(false);
