@@ -179,6 +179,30 @@ function formatINR(n) {
   return `${Number(n || 0).toFixed(2)} INR`;
 }
 
+// Fabcoins field: sirf numbers, aage ke zero nahi, aur max se zyada nahi
+function cleanPointsInput(raw, max) {
+  let value = String(raw ?? "")
+    .split(".")[0] // Fabcoins poore number mein: "12.75" -> "12"
+    .replace(/\D/g, "") // letters, comma, space - sab hatao
+    .replace(/^0+(?=\d)/, "") // "007" -> "7"
+    .slice(0, 9);
+  let capped = false;
+  if (value !== "" && Number(value) > max) {
+    value = max > 0 ? String(max) : "";
+    capped = true;
+  }
+  return { value, capped };
+}
+
+// Field mein jo dikh raha hai use bhi saaf value pe le aao (warna letters screen pe dikhte reh jaate)
+function syncFieldValue(el, value) {
+  try {
+    if (el && el.value !== value) el.value = value;
+  } catch {
+    // ignore
+  }
+}
+
 function isGiftCardApplied(appliedGiftCards, code) {
   if (!code) return false;
   const last4 = String(code).slice(-4).toLowerCase();
@@ -542,6 +566,13 @@ function Extension() {
     })();
   }, [restoreDone, appliedGiftCards, active]);
 
+  // Max kam ho gaya (jaise wallet laga) aur field mein usse zyada likha hai -> naye max pe le aao
+  useEffect(() => {
+    if (pointsInput !== "" && Number(pointsInput) > maxPoints) {
+      setPointsInput(maxPoints > 0 ? String(maxPoints) : "");
+    }
+  }, [maxPoints]);
+
   // ---------- OTP resend ka countdown ----------
   useEffect(() => {
     if (resendIn <= 0) return undefined;
@@ -815,8 +846,11 @@ function Extension() {
           maxLength={4}
           error={otpError || undefined}
           disabled={busy}
+          inputMode="numeric"
           onInput={(e) => {
-            const v = String(e.currentTarget?.value ?? e.target?.value ?? "").replace(/\D/g, "").slice(0, 4);
+            const el = e.currentTarget || e.target;
+            const v = String(el?.value ?? "").replace(/\D/g, "").slice(0, 4);
+            syncFieldValue(el, v);
             setOtpInput(v);
             setOtpError("");
           }}
@@ -850,11 +884,17 @@ function Extension() {
           min={minPoints}
           max={maxPoints}
           step={1}
+          inputMode="numeric"
           error={fieldError || undefined}
           disabled={busy || maxPoints < minPoints}
           onInput={(e) => {
-            setPointsInput(e.currentTarget?.value ?? e.target?.value ?? "");
-            setFieldError("");
+            const el = e.currentTarget || e.target;
+            const { value, capped } = cleanPointsInput(el?.value, maxPoints);
+            syncFieldValue(el, value);
+            setPointsInput(value);
+            setFieldError(
+              capped ? `You can use up to ${formatNum(maxPoints)} ${LABEL} on this order.` : "",
+            );
           }}
         />
         <s-stack direction="inline">
