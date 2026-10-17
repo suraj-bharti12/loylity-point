@@ -24,9 +24,9 @@ const DEFAULT_TITLE = "Fabcoins";
 const DEFAULT_POINTS_LABEL = "Fabcoins"; // customer ko "points" ki jagah yahi shabd dikhega
 // Abhi ka naam (settings se); har render pe update hota hai, har message isi se banta hai
 let LABEL = DEFAULT_POINTS_LABEL;
-const DEFAULT_HIDE_PRODUCT_TYPES = "gift cards, custom kurta";
+const DEFAULT_HIDE_PRODUCT_TYPES = "gift cards";
 // In shabdon se shuru hone wala coupon code laga ho to box nahi dikhega (jaise EMP10, EMP-STAFF)
-const DEFAULT_HIDE_COUPON_PREFIXES = "EMP";
+const DEFAULT_HIDE_COUPON_PREFIXES = "";
 
 function readSettings() {
   const s = shopify.settings?.value || {};
