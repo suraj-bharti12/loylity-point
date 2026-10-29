@@ -258,20 +258,41 @@ function validateRedeemInput(pts, bill) {
 
 // ---------------- Reverse (cancel / 10 min / sweeper sab yahi use karte hain) ----------------
 
-export async function reverseRedemption(row, finalStatus = "reversed") {
+// SECURITY: ek redeem ko ek hi waqt pe ek hi jagah se wapas karo.
+// (Remove + EMP + sweeper ek saath aa jayein to bhi points sirf EK baar wapas jayein)
+const reverseInFlight = new Map(); // row.id -> chal raha kaam (Promise)
+
+export function reverseRedemption(row, finalStatus = "reversed") {
+  const running = reverseInFlight.get(row.id);
+  if (running) return running; // pehle wale kaam ka hi jawab do, dobara mat chalao
+  const job = reverseRedemptionOnce(row, finalStatus).finally(() => reverseInFlight.delete(row.id));
+  reverseInFlight.set(row.id, job);
+  return job;
+}
+
+async function reverseRedemptionOnce(staleRow, finalStatus) {
+  // DB se taaza haal: kisi aur ne abhi-abhi suljha diya ho (cancel/sweeper) to dobara kuch mat karo
+  const row = await prisma.pointsRedemption.findUnique({ where: { id: staleRow.id } });
+  if (!row || row.status !== staleRow.status) {
+    return { ok: true, status: row?.status || "not_found" };
+  }
+
   // 1) Gift card: agar order mein use ho chuka to points wapas NAHI
   if (row.giftCardId) {
     try {
-      const state = await getGiftCardState(row.shop, row.giftCardId);
+      let state = await getGiftCardState(row.shop, row.giftCardId);
+      if (state.enabled && !(state.balance < state.initial)) {
+        await deactivateGiftCard(row.shop, row.giftCardId);
+        // SECURITY: card ab band hai (aage use nahi ho sakta). Dobara dekho: band hone se
+        // theek pehle order mein use to nahi hua? Warna order bhi ho jata aur points bhi wapas.
+        state = await getGiftCardState(row.shop, row.giftCardId);
+      }
       if (state.balance < state.initial) {
         await prisma.pointsRedemption.update({
           where: { id: row.id },
           data: { status: "used" },
         });
         return { ok: true, status: "used" };
-      }
-      if (state.enabled) {
-        await deactivateGiftCard(row.shop, row.giftCardId);
       }
     } catch (err) {
       // Gift card band nahi hua -> status same rakho, baad mein dobara try hoga
@@ -496,9 +517,11 @@ async function checkRedeemOtp(customerGid, otp) {
     return fail("OTP_LOCKED", "Too many incorrect attempts. Please request a new OTP.");
   }
 
+  // SECURITY: koshish Gupshup ke jawab se PEHLE gino. Ek saath bahut saari requests bhej ke
+  // bhi 3 se zyada OTP try na ho sakein. (Sahi OTP pe neeche 0 ho jata hai.)
+  st.attempts = (st.attempts || 0) + 1;
   const r = await verifyOtp(st.phone, otp);
   if (!r.ok) {
-    st.attempts = (st.attempts || 0) + 1;
     const left = OTP_MAX_VERIFY_ATTEMPTS - st.attempts;
     if (left <= 0) {
       return fail("OTP_LOCKED", "Too many incorrect attempts. Please request a new OTP.");
@@ -652,15 +675,16 @@ async function redeem({ shop, customerGid, points, billAmount, checkoutToken, ot
 // (Fabcoins gift card ek normal code hai; koi apna code kisi aur ko de de to wo uske Fabcoins kharch kar sakta hai.)
 // Sirf "active" Fabcoins cards dekhte hain: used ka balance 0 hai, aur reversed/cancelled band ho chuke hain.
 // Guest (login nahi) ke checkout pe laga har Fabcoins card "doosre ka" hai.
-async function checkForeign({ customerGid, appliedLast4 }) {
+async function checkForeign({ shop, customerGid, appliedLast4 }) {
   const list = (Array.isArray(appliedLast4) ? appliedLast4 : [])
     .map((x) => String(x || "").trim())
     .filter((x) => /^[A-Za-z0-9]{4}$/.test(x))
     .slice(0, 20);
-  if (!list.length) return { ok: true, removeLast4: [] };
+  if (!list.length || !shop) return { ok: true, removeLast4: [] };
 
   const wanted = new Set(list.map((x) => x.toLowerCase()));
-  const rows = await prisma.pointsRedemption.findMany({ where: { status: "active" } });
+  // SECURITY: sirf isi store ke cards (doosre store ka data kabhi nahi dekhte)
+  const rows = await prisma.pointsRedemption.findMany({ where: { shop, status: "active" } });
   const foreign = new Set();
   for (const r of rows) {
     const l4 = String(r.giftCardLast4 || "").toLowerCase();
@@ -757,7 +781,7 @@ async function handlePointsActionInner({ shop, customerGid, body }) {
   // Security check guest checkout pe bhi chalta hai (login ki zarurat nahi)
   if (action === "checkForeign") {
     try {
-      return await checkForeign({ customerGid, appliedLast4: body.appliedLast4 });
+      return await checkForeign({ shop, customerGid, appliedLast4: body.appliedLast4 });
     } catch (err) {
       console.error("[points] checkForeign", err);
       return fail("SERVER_ERROR", "Something went wrong.");
@@ -882,3 +906,68 @@ export function startPointsSweeper() {
 }
 
 startPointsSweeper();
+
+// ======================================================================
+// GDPR / privacy - Shopify ke 3 zaroori (compliance) webhooks
+// Route: app/routes/webhooks.compliance.jsx
+// Hamare DB mein customer ka data: Shopify customer ID + mobile number (memberId) + redeem history.
+// ======================================================================
+function customerGidFromPayload(payload) {
+  const id = payload?.customer?.id;
+  return id ? `gid://shopify/Customer/${id}` : null;
+}
+
+// customers/data_request: store owner ko batana ki is customer ka kya data hamare paas hai.
+// (Render Logs mein record aata hai; store owner maange to wahan se de do. Phone number log nahi karte.)
+export async function gdprCustomerDataRequest({ shop, payload }) {
+  const customerGid = customerGidFromPayload(payload);
+  if (!customerGid) return { records: 0 };
+  const rows = await prisma.pointsRedemption.findMany({ where: { shop, customerId: customerGid } });
+  console.log(
+    "[gdpr] customers/data_request",
+    JSON.stringify({
+      shop,
+      customer: customerGid,
+      dataRequestId: payload?.data_request?.id ?? null,
+      records: rows.map((r) => ({
+        id: r.id,
+        status: r.status,
+        pointsRedeemed: r.pointsRedeemed ?? r.pointsRequested,
+        amountRedeemed: r.amountRedeemed,
+        referenceId: r.invoiceNumber,
+        createdAt: r.createdAt,
+      })),
+    }),
+  );
+  return { records: rows.length };
+}
+
+// customers/redact: is customer ka saara data mitao.
+// Pehle koi Fabcoins abhi lage hon to wapas (gift card band + Mojito unblock), phir records delete.
+export async function gdprCustomerRedact({ shop, payload }) {
+  const customerGid = customerGidFromPayload(payload);
+  if (!customerGid) return { deleted: 0 };
+  const active = await prisma.pointsRedemption.findMany({
+    where: { shop, customerId: customerGid, status: "active" },
+  });
+  for (const row of active) {
+    try {
+      await reverseRedemption(row, "cancelled");
+    } catch (err) {
+      console.error("[gdpr] customers/redact reverse failed", row.id, err?.message || err);
+    }
+  }
+  const res = await prisma.pointsRedemption.deleteMany({ where: { shop, customerId: customerGid } });
+  otpState.delete(customerGid);
+  phoneCache.delete(customerGid);
+  console.log("[gdpr] customers/redact", shop, customerGid, "deleted records:", res.count);
+  return { deleted: res.count };
+}
+
+// shop/redact: app hataane ke 48 ghante baad - us store ka saara data mitao.
+export async function gdprShopRedact({ shop }) {
+  const redemptions = await prisma.pointsRedemption.deleteMany({ where: { shop } });
+  const sessions = await prisma.session.deleteMany({ where: { shop } });
+  console.log("[gdpr] shop/redact", shop, "deleted redemptions:", redemptions.count, "sessions:", sessions.count);
+  return { deletedRedemptions: redemptions.count, deletedSessions: sessions.count };
+}

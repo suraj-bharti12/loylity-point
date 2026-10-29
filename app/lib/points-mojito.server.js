@@ -1,11 +1,14 @@
 // app/lib/points-mojito.server.js
 //
 // Loyalty points ke Mojito APIs.
-//   POINTS_API_MODE=mojito  -> asli APIs (fabindia.mojitolabs.com)
-//   (kuch nahi / dummy)      -> DUMMY: fake points, memory mein (local testing)
+//   (kuch nahi) / POINTS_API_MODE=mojito -> asli APIs (fabindia.mojitolabs.com)  <- DEFAULT
+//   POINTS_API_MODE=dummy                 -> nakli points, sirf LOCAL testing ke liye.
+//
+// SECURITY: dummy kabhi apne aap chalu nahi hota, aur live (NODE_ENV=production) mein
+// dummy likha ho to bhi nahi chalta - app Fabcoins dena band kar deta hai (fail closed).
 //
 // Asli mode ke liye env (dono mein se koi ek tareeka):
-//   MOJITO_BASIC_AUTH=dXNlcl9m...   (Postman ke Authorization header ki value, "Basic " ke baad wala hissa)
+//   MOJITO_BASIC_AUTH=...   (Postman ke Authorization header ki value, "Basic " ke baad wala hissa)
 //   ya MOJITO_API_USER=... + MOJITO_API_PASS=...
 //   MOJITO_POINTS_BASE_URL   (optional, default https://fabindia.mojitolabs.com)
 //   POINTS_RUPEE_PER_POINT   (optional, default 1  -> Mojito currencyRate 1.0)
@@ -13,8 +16,18 @@
 
 import crypto from "node:crypto";
 
-const MODE = String(process.env.POINTS_API_MODE || "dummy").trim().toLowerCase();
-const IS_LIVE = MODE === "mojito";
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+const MODE = String(process.env.POINTS_API_MODE || "mojito").trim().toLowerCase();
+// Nakli points sirf tab: saaf "dummy" likha ho AUR live server na ho
+const IS_DUMMY = MODE === "dummy" && !IS_PRODUCTION;
+const IS_LIVE = !IS_DUMMY;
+// Galat setting (live pe dummy, ya koi aur shabd) -> koi points nahi
+const CONFIG_PROBLEM =
+  MODE === "dummy" && IS_PRODUCTION
+    ? "POINTS_API_MODE=dummy live server pe allowed nahi"
+    : MODE !== "dummy" && MODE !== "mojito"
+      ? `POINTS_API_MODE="${MODE}" samajh nahi aaya (mojito ya dummy)`
+      : "";
 
 const RUPEE_PER_POINT = Number(process.env.POINTS_RUPEE_PER_POINT || "1");
 // Default 1 = customer kitne bhi points (1 se upar) redeem kar sakta hai
@@ -25,7 +38,7 @@ const BASE_URL = String(process.env.MOJITO_POINTS_BASE_URL || "https://fabindia.
   .replace(/\/+$/, "");
 const API_USER = String(process.env.MOJITO_API_USER || "").trim();
 const API_PASS = String(process.env.MOJITO_API_PASS || "").trim();
-// Postman wala header seedha: "Basic dXNl..." ya sirf "dXNl..."
+// Postman wala header seedha: "Basic xxxx..." ya sirf "xxxx..."
 const BASIC_TOKEN = String(process.env.MOJITO_BASIC_AUTH || "")
   .trim()
   .replace(/^Basic\s+/i, "");
@@ -39,11 +52,12 @@ function authHeader() {
 }
 const TIMEOUT_MS = 12 * 1000;
 
-if (IS_LIVE && !authHeader()) {
-  console.error("[points] POINTS_API_MODE=mojito hai par MOJITO_BASIC_AUTH (ya USER/PASS) nahi mila");
-}
-if (!IS_LIVE) {
-  console.warn("[points] DUMMY points mode (POINTS_API_MODE=mojito nahi hai)");
+if (CONFIG_PROBLEM) {
+  console.error(`[points] ${CONFIG_PROBLEM} -> Fabcoins BAND (koi points/gift card nahi banega)`);
+} else if (IS_LIVE && !authHeader()) {
+  console.error("[points] MOJITO_BASIC_AUTH (ya USER/PASS) nahi mila -> Fabcoins BAND");
+} else if (IS_DUMMY) {
+  console.warn("[points] DUMMY points mode (sirf local testing) - POINTS_API_MODE=dummy");
 }
 
 export class PointsApiError extends Error {
@@ -52,6 +66,11 @@ export class PointsApiError extends Error {
     this.name = "PointsApiError";
     this.code = code;
   }
+}
+
+// Setting galat ho to koi bhi points wala kaam mat karo
+function assertConfigured() {
+  if (CONFIG_PROBLEM) throw new PointsApiError(CONFIG_PROBLEM, "CONFIG");
 }
 
 // ---------------- Helpers ----------------
@@ -76,7 +95,7 @@ function numericId(gid) {
 }
 
 export function isPointsDummy() {
-  return !IS_LIVE;
+  return IS_DUMMY;
 }
 
 // "919870579335" / "+91 98705 79335" -> "9870579335" (Mojito 10 digit leta hai)
@@ -296,6 +315,7 @@ async function dummyNetwork(memberId) {
 
 // memberId: asli mode mein 10 digit mobile, dummy mein kuch bhi
 export async function fetchPointsBalance({ memberId }) {
+  assertConfigured();
   const id = String(memberId || "").trim();
   if (!id) throw new PointsApiError("memberId khali hai", "INVALID_INPUT");
 
@@ -317,6 +337,7 @@ export async function fetchPointsBalance({ memberId }) {
 
 // Points block (redeem)
 export async function redeemPoints({ memberId, points, requestId, billAmount, cart }) {
+  assertConfigured();
   const id = String(memberId || "").trim();
   const pts = Number(points);
   if (!id) throw new PointsApiError("memberId khali hai", "INVALID_INPUT");
@@ -358,6 +379,7 @@ export async function redeemPoints({ memberId, points, requestId, billAmount, ca
 
 // Points unblock (cancel). invoiceNumber = Mojito referenceId
 export async function cancelPointsRedeem({ invoiceNumber, memberId, points }) {
+  assertConfigured();
   const ref = String(invoiceNumber || "").trim();
   if (!ref) throw new PointsApiError("referenceId khali hai", "INVALID_INPUT");
 

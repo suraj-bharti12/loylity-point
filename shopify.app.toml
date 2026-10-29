@@ -44,6 +44,11 @@ api_version = "2026-10"
   uri = "/webhooks/app/scopes_update"
   topics = [ "app/scopes_update" ]
 
+   # GDPR / privacy ke 3 zaroori webhooks (app/routes/webhooks.compliance.jsx)
+  [[webhooks.subscriptions]]
+  compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
+  uri = "/webhooks/compliance"
+
 [auth]
 redirect_urls = [
   "https://loylity-point.onrender.com/auth/callback",

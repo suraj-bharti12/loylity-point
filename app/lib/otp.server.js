@@ -4,7 +4,10 @@
 // Secrets sirf .env mein:
 //   GUPSHUP_USERID=...
 //   GUPSHUP_PASSWORD=...
-// Dono nahi hain to DUMMY mode: SMS nahi jayega, OTP hamesha 1234.
+// Local testing ke liye nakli OTP (hamesha 1234): OTP_MODE=dummy
+//
+// SECURITY: nakli OTP kabhi apne aap chalu nahi hota, aur live (NODE_ENV=production) mein
+// kabhi nahi chalta. Gupshup details na hon to OTP jayega hi nahi -> Fabcoins nahi lagenge (fail closed).
 
 const GUPSHUP_URL = "https://enterprise.smsgupshup.com/GatewayAPI/rest";
 // .trim(): Windows .env ke line-end wale chhupe characters (\r) aur spaces hatao
@@ -18,7 +21,11 @@ function credsHint() {
   const u = USERID.length > 7 ? `${USERID.slice(0, 4)}***${USERID.slice(-3)}` : "***";
   return ` | server uid ${u} (${USERID.length} chars), pw ${PASSWORD.length} chars`;
 }
-const DUMMY = !USERID || !PASSWORD;
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+const OTP_MODE = String(process.env.OTP_MODE || "gupshup").trim().toLowerCase();
+// Nakli OTP sirf tab: saaf "dummy" likha ho AUR live server na ho
+const DUMMY = OTP_MODE === "dummy" && !IS_PRODUCTION;
+const HAS_CREDS = Boolean(USERID && PASSWORD);
 const DUMMY_OTP = "1234";
 const OTP_LENGTH = 4;
 const TIMEOUT_MS = 15 * 1000;
@@ -27,8 +34,13 @@ const TIMEOUT_MS = 15 * 1000;
 const OTP_TEMPLATE =
   "Dear Customer, Your OTP is %code%. Please use this for any of your interactions on Fabindia. OTP is valid for 30 secs. -Fabindia";
 
+if (OTP_MODE === "dummy" && IS_PRODUCTION) {
+  console.error("[otp] OTP_MODE=dummy live server pe allowed nahi -> asli Gupshup hi chalega");
+}
 if (DUMMY) {
-  console.warn("[otp] GUPSHUP_USERID / GUPSHUP_PASSWORD nahi mile -> DUMMY OTP mode (OTP = 1234)");
+  console.warn("[otp] DUMMY OTP mode (sirf local testing) - OTP = 1234");
+} else if (!HAS_CREDS) {
+  console.error("[otp] GUPSHUP_USERID / GUPSHUP_PASSWORD nahi mile -> OTP band (Fabcoins nahi lagenge)");
 }
 
 export function isOtpDummy() {
@@ -87,6 +99,9 @@ export async function sendOtp(phoneDigits) {
     console.log(`[otp] DUMMY OTP for ${maskPhone(phoneDigits)}: ${DUMMY_OTP}`);
     return { ok: true, dummy: true };
   }
+  if (!HAS_CREDS) {
+    return { ok: false, dummy: false, details: "Gupshup credentials missing" };
+  }
   const r = await callGupshup({
     phone_no: phoneDigits,
     msg: OTP_TEMPLATE,
@@ -105,6 +120,9 @@ export async function verifyOtp(phoneDigits, otp) {
   }
   if (DUMMY) {
     return { ok: code === DUMMY_OTP, details: code === DUMMY_OTP ? "matched" : "mismatch" };
+  }
+  if (!HAS_CREDS) {
+    return { ok: false, details: "Gupshup credentials missing" };
   }
   const r = await callGupshup({ phone_no: phoneDigits, otp_code: code });
   if (!r.ok) console.error("[otp] verify failed:", r.details);
