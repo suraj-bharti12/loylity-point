@@ -211,6 +211,21 @@ function isGiftCardApplied(appliedGiftCards, code) {
   );
 }
 
+// Naya bana gift card checkout pe lagao. Kabhi-kabhi naya card checkout tak 1-2 sec mein
+// pahunchta hai, isliye fail ho to thoda ruk ke dobara try (kul 3 baar: 0s, 1.5s, 3s).
+// Card pehle se laga mil jaye to bhi safal. Aakhir tak fail -> Shopify ka error wapas.
+async function addGiftCardWithRetry(api, code, waitMs = 1500, tries = 3) {
+  let res = null;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    res = await api.applyGiftCardChange({ type: "addGiftCard", code });
+    if (res?.type !== "error") return res;
+    if (isGiftCardApplied(api.appliedGiftCards?.value, code)) return { type: "success" };
+    console.error(`[gift card] apply try ${attempt} failed:`, res?.message || res);
+    if (attempt < tries) await new Promise((r) => setTimeout(r, waitMs * attempt));
+  }
+  return res;
+}
+
 // Mojito ko bhejne ke liye cart ki details
 function buildCart() {
   const lines = shopify.lines.value || [];
@@ -719,17 +734,16 @@ function Extension() {
       await writeSaved(record);
 
       // Gift card checkout pe lagao (wallet jaisa)
-      const applyRes = await shopify.applyGiftCardChange({
-        type: "addGiftCard",
-        code: record.giftCardCode,
-      });
+      const applyRes = await addGiftCardWithRetry(shopify, record.giftCardCode);
       if (applyRes?.type === "error") {
         await callApi("cancel", { redemptionId: record.redemptionId });
         await clearSaved();
         setOtpStage(null);
         setNotice({
           tone: "critical",
-          text: `Couldn't apply your ${LABEL} to this order. Your ${LABEL} will be returned.`,
+          text:
+            `Couldn't apply your ${LABEL} to this order. Your ${LABEL} will be returned.` +
+            (SHOW_DEBUG && applyRes?.message ? ` (${applyRes.message})` : ""),
         });
         await loadBalance();
         return;
