@@ -12,6 +12,15 @@
 //   ya MOJITO_API_USER=... + MOJITO_API_PASS=...
 //   MOJITO_POINTS_BASE_URL   (optional, default https://fabindia.mojitolabs.com)
 //   POINTS_RUPEE_PER_POINT   (optional, default 1  -> Mojito currencyRate 1.0)
+//
+// Live store aur testing store ka alag Mojito (ek hi app, ek hi server):
+//   MOJITO_LIVE_SHOPS        (optional, default fabindia2.myshopify.com) -> MOJITO_POINTS_BASE_URL
+//   MOJITO_TEST_SHOPS        (jaise staging-fabindia.myshopify.com)      -> MOJITO_TEST_BASE_URL
+//   MOJITO_TEST_BASE_URL     (testing wala Mojito domain)
+//   MOJITO_TEST_BASIC_AUTH   (optional; na ho to live wala MOJITO_BASIC_AUTH hi)
+//   Kai store hon to comma se: a.myshopify.com,b.myshopify.com
+// SECURITY: jo store kisi list mein nahi, uske liye Fabcoins band. Testing store kabhi
+// galti se live Mojito pe nahi jayega (aur test URL na mila to bhi live pe nahi jayega).
 //   POINTS_MIN_REDEEM        (optional, default 1 = koi minimum nahi)
 
 import crypto from "node:crypto";
@@ -33,13 +42,29 @@ const RUPEE_PER_POINT = Number(process.env.POINTS_RUPEE_PER_POINT || "1");
 // Default 1 = customer kitne bhi points (1 se upar) redeem kar sakta hai
 const MIN_REDEEM_POINTS = Math.max(1, Number(process.env.POINTS_MIN_REDEEM || "1"));
 
-const BASE_URL = String(process.env.MOJITO_POINTS_BASE_URL || "https://fabindia.mojitolabs.com")
-  .trim()
-  .replace(/\/+$/, "");
+function cleanUrl(v) {
+  return String(v || "").trim().replace(/\/+$/, "");
+}
+// "https://Fabindia2.myshopify.com/" -> "fabindia2.myshopify.com"
+function normalizeShop(v) {
+  return String(v || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+}
+function parseShops(v) {
+  return new Set(String(v || "").split(/[\s,]+/).map(normalizeShop).filter(Boolean));
+}
+
+const BASE_URL = cleanUrl(process.env.MOJITO_POINTS_BASE_URL || "https://fabindia.mojitolabs.com");
+const TEST_BASE_URL = cleanUrl(process.env.MOJITO_TEST_BASE_URL);
+const LIVE_SHOPS = parseShops(process.env.MOJITO_LIVE_SHOPS || "fabindia2.myshopify.com");
+const TEST_SHOPS = parseShops(process.env.MOJITO_TEST_SHOPS);
+
 const API_USER = String(process.env.MOJITO_API_USER || "").trim();
 const API_PASS = String(process.env.MOJITO_API_PASS || "").trim();
 // Postman wala header seedha: "Basic xxxx..." ya sirf "xxxx..."
 const BASIC_TOKEN = String(process.env.MOJITO_BASIC_AUTH || "")
+  .trim()
+  .replace(/^Basic\s+/i, "");
+const TEST_BASIC_TOKEN = String(process.env.MOJITO_TEST_BASIC_AUTH || "")
   .trim()
   .replace(/^Basic\s+/i, "");
 
@@ -50,6 +75,9 @@ function authHeader() {
   }
   return null;
 }
+function testAuthHeader() {
+  return TEST_BASIC_TOKEN ? `Basic ${TEST_BASIC_TOKEN}` : authHeader();
+}
 const TIMEOUT_MS = 12 * 1000;
 
 if (CONFIG_PROBLEM) {
@@ -58,6 +86,12 @@ if (CONFIG_PROBLEM) {
   console.error("[points] MOJITO_BASIC_AUTH (ya USER/PASS) nahi mila -> Fabcoins BAND");
 } else if (IS_DUMMY) {
   console.warn("[points] DUMMY points mode (sirf local testing) - POINTS_API_MODE=dummy");
+}
+if (IS_LIVE) {
+  console.log(`[points] LIVE Mojito ${BASE_URL} <- ${[...LIVE_SHOPS].join(", ") || "(koi store nahi)"}`);
+  if (TEST_SHOPS.size) {
+    console.log(`[points] TEST Mojito ${TEST_BASE_URL || "(MOJITO_TEST_BASE_URL nahi mila -> BAND)"} <- ${[...TEST_SHOPS].join(", ")}`);
+  }
 }
 
 export class PointsApiError extends Error {
@@ -120,15 +154,43 @@ export function getPointsConfig() {
 
 // ======================= ASLI MOJITO =======================
 
-async function callMojito(path, payload) {
-  const auth = authHeader();
+// Kaunse store ke liye kaunsa Mojito. Har store ka faisla ek baar log mein bhi dikhta hai.
+const targetLogged = new Set();
+function mojitoTarget(shop) {
+  const s = normalizeShop(shop);
+  const isLive = LIVE_SHOPS.has(s);
+  const isTest = TEST_SHOPS.has(s);
+  let target = null;
+  let problem = "";
+  if (isLive && isTest) {
+    problem = `store ${s} LIVE aur TEST dono list mein hai`;
+  } else if (isTest) {
+    if (TEST_BASE_URL) target = { env: "TEST", baseUrl: TEST_BASE_URL, auth: testAuthHeader() };
+    else problem = `store ${s} testing store hai par MOJITO_TEST_BASE_URL nahi mila`;
+  } else if (isLive) {
+    target = { env: "LIVE", baseUrl: BASE_URL, auth: authHeader() };
+  } else {
+    problem = `store ${s || "(khali)"} kisi list mein nahi (MOJITO_LIVE_SHOPS / MOJITO_TEST_SHOPS)`;
+  }
+  const key = `${s}|${target?.env || "BAND"}`;
+  if (!targetLogged.has(key)) {
+    targetLogged.add(key);
+    if (target) console.log(`[points] ${s} -> ${target.env} Mojito (${target.baseUrl})`);
+    else console.error(`[points] ${problem} -> is store pe Fabcoins BAND`);
+  }
+  if (!target) throw new PointsApiError(problem, "CONFIG");
+  return target;
+}
+
+async function callMojito(target, path, payload) {
+  const auth = target.auth;
   if (!auth) {
     throw new PointsApiError("Mojito credentials missing (MOJITO_BASIC_AUTH)", "CONFIG");
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(`${BASE_URL}/${path}`, {
+    const res = await fetch(`${target.baseUrl}/${path}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -160,8 +222,8 @@ async function callMojito(path, payload) {
   }
 }
 
-async function liveBalance(phone) {
-  const json = await callMojito("points_history.php", { customerphone: Number(phone) });
+async function liveBalance(target, phone) {
+  const json = await callMojito(target, "points_history.php", { customerphone: Number(phone) });
   if (json.success !== true) {
     throw new PointsApiError(json.message || "Customer not found", "NOT_MEMBER");
   }
@@ -216,7 +278,7 @@ function makeBillNo() {
   return Number(`${Date.now()}${crypto.randomInt(10, 100)}`);
 }
 
-async function liveBlock({ phone, points, billAmount, cart }) {
+async function liveBlock(target, { phone, points, billAmount, cart }) {
   const billNo = makeBillNo();
   const { cartItems, totalNetAmount: totalNet, totalGrossAmount: totalGross } = computeTotals(cart, billAmount);
 
@@ -237,7 +299,7 @@ async function liveBlock({ phone, points, billAmount, cart }) {
 
   let json;
   try {
-    json = await callMojito("block_points_loyal.php", payload);
+    json = await callMojito(target, "block_points_loyal.php", payload);
   } catch (err) {
     err.billNo = billNo; // timeout pe baad mein haath se dhoondhne ke liye
     throw err;
@@ -271,8 +333,8 @@ async function liveBlock({ phone, points, billAmount, cart }) {
   };
 }
 
-async function liveUnblock({ phone, points, referenceId }) {
-  const json = await callMojito("unblock_points_loyal.php", {
+async function liveUnblock(target, { phone, points, referenceId }) {
+  const json = await callMojito(target, "unblock_points_loyal.php", {
     customerPhone: String(phone),
     points: Number(points),
     referenceId: String(referenceId),
@@ -314,14 +376,15 @@ async function dummyNetwork(memberId) {
 // ======================= Public functions =======================
 
 // memberId: asli mode mein 10 digit mobile, dummy mein kuch bhi
-export async function fetchPointsBalance({ memberId }) {
+// shop: kaunse store ka checkout (usi se live / test Mojito chuna jata hai)
+export async function fetchPointsBalance({ shop, memberId }) {
   assertConfigured();
   const id = String(memberId || "").trim();
   if (!id) throw new PointsApiError("memberId khali hai", "INVALID_INPUT");
 
   let points;
   if (IS_LIVE) {
-    points = await liveBalance(id);
+    points = await liveBalance(mojitoTarget(shop), id);
   } else {
     await dummyNetwork(id);
     points = getDummyBalance(id);
@@ -336,7 +399,7 @@ export async function fetchPointsBalance({ memberId }) {
 }
 
 // Points block (redeem)
-export async function redeemPoints({ memberId, points, requestId, billAmount, cart }) {
+export async function redeemPoints({ shop, memberId, points, requestId, billAmount, cart }) {
   assertConfigured();
   const id = String(memberId || "").trim();
   const pts = Number(points);
@@ -344,7 +407,7 @@ export async function redeemPoints({ memberId, points, requestId, billAmount, ca
   if (!Number.isInteger(pts) || pts <= 0) throw new PointsApiError("Points sahi nahi", "INVALID_INPUT");
 
   if (IS_LIVE) {
-    return liveBlock({ phone: id, points: pts, billAmount, cart });
+    return liveBlock(mojitoTarget(shop), { phone: id, points: pts, billAmount, cart });
   }
 
   // ---- dummy ----
@@ -378,13 +441,14 @@ export async function redeemPoints({ memberId, points, requestId, billAmount, ca
 }
 
 // Points unblock (cancel). invoiceNumber = Mojito referenceId
-export async function cancelPointsRedeem({ invoiceNumber, memberId, points }) {
+// shop: jis store pe points block hue the (unblock bhi usi Mojito pe hona chahiye)
+export async function cancelPointsRedeem({ shop, invoiceNumber, memberId, points }) {
   assertConfigured();
   const ref = String(invoiceNumber || "").trim();
   if (!ref) throw new PointsApiError("referenceId khali hai", "INVALID_INPUT");
 
   if (IS_LIVE) {
-    return liveUnblock({ phone: String(memberId || "").trim(), points, referenceId: ref });
+    return liveUnblock(mojitoTarget(shop), { phone: String(memberId || "").trim(), points, referenceId: ref });
   }
 
   // ---- dummy ----

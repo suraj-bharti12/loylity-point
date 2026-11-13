@@ -311,6 +311,7 @@ async function reverseRedemptionOnce(staleRow, finalStatus) {
   if (row.invoiceNumber) {
     try {
       await cancelPointsRedeem({
+        shop: row.shop,
         invoiceNumber: row.invoiceNumber,
         memberId: row.memberId,
         points: row.pointsRedeemed ?? row.pointsRequested,
@@ -401,7 +402,7 @@ async function getBalance(shop, customerGid) {
   const m = await resolveMemberId(shop, customerGid);
   if (m.fail) return m.fail;
   try {
-    const b = await fetchPointsBalance({ memberId: m.memberId });
+    const b = await fetchPointsBalance({ shop, memberId: m.memberId });
     return {
       ok: true,
       points: b.points,
@@ -430,7 +431,7 @@ async function sendRedeemOtp({ shop, customerGid, points, billAmount, checkoutTo
   const m = await resolveMemberId(shop, customerGid);
   if (m.fail) return m.fail;
   try {
-    const b = await fetchPointsBalance({ memberId: m.memberId });
+    const b = await fetchPointsBalance({ shop, memberId: m.memberId });
     if (pts > b.points) return fail("INSUFFICIENT_POINTS", `You don't have enough ${L()}.`);
   } catch (err) {
     return apiErrorToFail(err);
@@ -570,7 +571,7 @@ async function redeem({ shop, customerGid, points, billAmount, checkoutToken, ot
   // 1) Points kaato
   let r;
   try {
-    r = await redeemPoints({ memberId, points: pts, requestId: row.id, billAmount: bill, cart });
+    r = await redeemPoints({ shop, memberId, points: pts, requestId: row.id, billAmount: bill, cart });
   } catch (err) {
     console.error("[points] redeem failed:", err?.code, err?.message);
     // Timeout: ho sakta hai points block ho gaye hon -> haath se check
@@ -606,7 +607,7 @@ async function redeem({ shop, customerGid, points, billAmount, checkoutToken, ot
     // Gift card nahi bana -> points turant wapas
     let pointsBack = false;
     try {
-      await cancelPointsRedeem({ invoiceNumber: r.invoiceNumber, memberId, points: r.pointsRedeemed });
+      await cancelPointsRedeem({ shop, invoiceNumber: r.invoiceNumber, memberId, points: r.pointsRedeemed });
       pointsBack = true;
     } catch {
       pointsBack = false;
